@@ -19,4 +19,4 @@ This repo is deployed by the `dataflow-example-app` Argo CD Application defined 
 
 - `https://github.com/dotcomrow/dataflow-apps`
 
-Target namespace: `kafka`
+Target namespace: `dataflow`

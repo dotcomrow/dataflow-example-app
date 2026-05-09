@@ -2,14 +2,42 @@
 # Batch processing examples (waves 50-52)
 # - Kafka example topics and seed data
 # - Flink SQL job submission for Kafka input/output pipeline
-# - NiFi flow reference mounted into the NiFi pod
+# - NiFi flow reference document
 # ============================================================================
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: batch-kafka-config
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+data:
+  bootstrap_servers: "kafka.kafka.svc.internal.lan:9092"
+  security_protocol: "SASL_PLAINTEXT"
+  sasl_mechanism: "SCRAM-SHA-256"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-security-credentials
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+type: Opaque
+stringData:
+  admin_username: "<path:secret/data/kafka-admin-username#value>"
+  admin_password: "<path:secret/data/kafka-admin-password#value>"
+  nifi_username: "<path:secret/data/kafka-nifi-username#value>"
+  nifi_password: "<path:secret/data/kafka-nifi-password#value>"
+  flink_username: "<path:secret/data/kafka-flink-username#value>"
+  flink_password: "<path:secret/data/kafka-flink-password#value>"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: batch-processing-examples-config
-  namespace: kafka
+  namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "50"
 data:
@@ -22,15 +50,15 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: nifi-kafka-example-reference
-  namespace: kafka
+  namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "50"
 data:
   kafka-batch-reference.md: |-
     # NiFi to Kafka Example Flow (Reference)
 
-    This file is mounted at `/opt/nifi/nifi-current/conf/examples/kafka-batch-reference.md`
-    in the NiFi pod and shows a minimal end-to-end example.
+    This reference lives in the `dataflow` namespace for operators to copy into NiFi.
+    It documents a minimal end-to-end example.
 
     ## Goal
     Publish records from NiFi into Kafka topic `batch.example.nifi.raw.v1` using the
@@ -71,7 +99,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: batch-example-kafka-topics
-  namespace: kafka
+  namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "50"
     argocd.argoproj.io/sync-options: Force=true,Replace=true
@@ -171,7 +199,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: batch-example-kafka-seed-input
-  namespace: kafka
+  namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "51"
     argocd.argoproj.io/sync-options: Force=true,Replace=true
@@ -251,7 +279,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: batch-example-flink-submit
-  namespace: kafka
+  namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "52"
     argocd.argoproj.io/sync-options: Force=true,Replace=true
