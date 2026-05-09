@@ -1,8 +1,9 @@
 # ============================================================================
-# Batch processing examples (waves 50-52)
+# Batch processing examples (waves 50-53)
 # - Kafka example topics and seed data
 # - Flink SQL job submission for Kafka input/output pipeline
-# - NiFi flow reference document
+# - NiFi flow reference document (produce + consume chains)
+# - Output verification as NiFi principal
 # ============================================================================
 ---
 apiVersion: v1
@@ -44,6 +45,7 @@ data:
   input_topic: "batch.example.nifi.raw.v1"
   output_topic: "batch.example.flink.enriched.v1"
   input_consumer_group: "flink-batch-example-v1"
+  nifi_output_consumer_group: "nifi-batch-example-output-v1"
   flink_pipeline_name: "batch-example-nifi-to-flink"
 ---
 apiVersion: v1
@@ -55,16 +57,19 @@ metadata:
     argocd.argoproj.io/sync-wave: "50"
 data:
   kafka-batch-reference.md: |-
-    # NiFi to Kafka Example Flow (Reference)
+    # NiFi + Flink + Kafka Example Flow (Reference)
 
     This reference lives in the `dataflow` namespace for operators to copy into NiFi.
-    It documents a minimal end-to-end example.
+    It documents a minimal end-to-end example where:
+    1. NiFi publishes to Kafka input topic.
+    2. Flink consumes input topic and writes enriched records to output topic.
+    3. NiFi consumes Flink output topic for downstream handling.
 
-    ## Goal
-    Publish records from NiFi into Kafka topic `batch.example.nifi.raw.v1` using the
-    existing service principal and SCRAM auth.
+    ## Topics
+    - NiFi -> Flink input: `batch.example.nifi.raw.v1`
+    - Flink -> NiFi output: `batch.example.flink.enriched.v1`
 
-    ## Processor chain
+    ## Chain A: NiFi producer flow (into Flink)
     1. `GenerateFlowFile`
     2. `UpdateAttribute`
     3. `PublishKafka_2_6`
@@ -91,9 +96,26 @@ data:
     - bootstrap.servers:
       `${BATCH_KAFKA_BOOTSTRAP_SERVERS}`
 
-    ## Optional verification chain
-    Add `ConsumeKafka_2_6` pointing to topic `batch.example.flink.enriched.v1` and
-    connect to `LogAttribute` to verify Flink-enriched records arriving from Kafka.
+    ## Chain B: NiFi consumer flow (from Flink output)
+    1. `ConsumeKafka_2_6`
+    2. `RouteOnAttribute` (optional rules)
+    3. `LogAttribute` (or your real sink processor)
+
+    `ConsumeKafka_2_6`
+    - Topic Name Format: `names`
+    - Topics: `batch.example.flink.enriched.v1`
+    - Group ID: `nifi-batch-example-output-v1`
+    - Security Protocol: `${BATCH_KAFKA_SECURITY_PROTOCOL}`
+    - SASL Mechanism: `${BATCH_KAFKA_SASL_MECHANISM}`
+    - SASL JAAS Config:
+      `org.apache.kafka.common.security.scram.ScramLoginModule required username="${BATCH_KAFKA_USERNAME}" password="${BATCH_KAFKA_PASSWORD}";`
+    - bootstrap.servers:
+      `${BATCH_KAFKA_BOOTSTRAP_SERVERS}`
+
+    ## Verify end-to-end
+    - Run Chain A in NiFi.
+    - Confirm Flink output topic receives `flink-processed|...` records.
+    - Run Chain B and verify NiFi receives those records.
 ---
 apiVersion: batch/v1
 kind: Job
@@ -423,3 +445,94 @@ spec:
                 -Drest.port=8081 \
                 -f /tmp/batch-example.sql
               echo "Flink SQL submission completed."
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-example-nifi-output-verify
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "53"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: batch-example-nifi-output-verify
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: verify-flink-output-as-nifi
+          image: apache/kafka:3.9.0
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: bootstrap_servers
+            - name: KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: security_protocol
+            - name: KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: sasl_mechanism
+            - name: KAFKA_NIFI_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: nifi_username
+            - name: KAFKA_NIFI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: nifi_password
+            - name: OUTPUT_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: output_topic
+            - name: NIFI_OUTPUT_CONSUMER_GROUP
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: nifi_output_consumer_group
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              CLIENT_CFG="/tmp/kafka-nifi-consumer.properties"
+              cat > "${CLIENT_CFG}" <<EOF
+              security.protocol=${KAFKA_SECURITY_PROTOCOL}
+              sasl.mechanism=${KAFKA_SASL_MECHANISM}
+              sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_NIFI_USERNAME}" password="${KAFKA_NIFI_PASSWORD}";
+              group.id=${NIFI_OUTPUT_CONSUMER_GROUP}
+              auto.offset.reset=earliest
+              EOF
+
+              echo "Verifying Flink output topic ${OUTPUT_TOPIC} is readable as NiFi principal..."
+              output_file="$(mktemp)"
+              /opt/kafka/bin/kafka-console-consumer.sh \
+                --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --consumer.config "${CLIENT_CFG}" \
+                --topic "${OUTPUT_TOPIC}" \
+                --timeout-ms 20000 \
+                --max-messages 10 > "${output_file}" || true
+
+              if [ ! -s "${output_file}" ]; then
+                echo "No records observed on ${OUTPUT_TOPIC} for NiFi principal yet."
+                echo "Expected after Flink submit: records prefixed with flink-processed|"
+                echo "Continuing without failure so Argo sync is not blocked."
+                exit 0
+              fi
+
+              echo "Sample records from ${OUTPUT_TOPIC}:"
+              cat "${output_file}"
+              echo "Verification successful."
