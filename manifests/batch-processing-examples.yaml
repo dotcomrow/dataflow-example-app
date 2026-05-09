@@ -79,6 +79,8 @@ spec:
   backoffLimit: 3
   template:
     metadata:
+      labels:
+        app.kubernetes.io/name: batch-example-kafka-topics
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -177,6 +179,8 @@ spec:
   backoffLimit: 3
   template:
     metadata:
+      labels:
+        app.kubernetes.io/name: batch-example-kafka-seed-input
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -255,6 +259,8 @@ spec:
   backoffLimit: 3
   template:
     metadata:
+      labels:
+        app.kubernetes.io/name: batch-example-flink-submit
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -313,7 +319,7 @@ spec:
             - |
               set -euo pipefail
 
-              FLINK_REST="http://flink-jobmanager.kafka.svc.cluster.local:8081"
+              FLINK_REST="http://flink-rest.kafka.svc.cluster.local:8081"
               CONNECTOR_JAR_URL="https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.3.0-1.20/flink-sql-connector-kafka-3.3.0-1.20.jar"
               CONNECTOR_JAR_PATH="/tmp/flink-sql-connector-kafka-3.3.0-1.20.jar"
 
@@ -385,7 +391,7 @@ spec:
 
               echo "Submitting Flink SQL pipeline from /tmp/batch-example.sql"
               /opt/flink/bin/sql-client.sh \
-                -Drest.address=flink-jobmanager.kafka.svc.cluster.local \
+                -Drest.address=flink-rest.kafka.svc.cluster.local \
                 -Drest.port=8081 \
                 -f /tmp/batch-example.sql
               echo "Flink SQL submission completed."
