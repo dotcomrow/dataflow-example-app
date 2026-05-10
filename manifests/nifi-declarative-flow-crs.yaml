@@ -39,7 +39,7 @@ spec:
   type: external
   clientType: tls
 
-  nifiURI: "https://nifi.kafka.svc.cluster.local:8443"
+  nifiURI: "nifi.kafka.svc.cluster.local:8443"
   nodeURITemplate: "nifi-%d.nifi-hs.kafka.svc.cluster.local:8443"
   nodes:
     - id: 0

@@ -41,7 +41,7 @@ spec:
   clientType: basic
 
   # Single-node NiFi in k8s-kafka namespace.
-  nifiURI: "https://nifi.kafka.svc.cluster.local:8443"
+  nifiURI: "nifi.kafka.svc.cluster.local:8443"
   nodeURITemplate: "nifi-%d.nifi-hs.kafka.svc.cluster.local:8443"
   nodes:
     - id: 0
