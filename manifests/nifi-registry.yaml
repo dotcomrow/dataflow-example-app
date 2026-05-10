@@ -1,0 +1,74 @@
+# ============================================================================
+# NiFi Registry (waves 54-55)
+# - Internal service used by NiFi declarative dataflow CRs
+# - Persists versioned flow definitions to PVC
+# ============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nifi-registry-data
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "54"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nifi-registry
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "55"
+spec:
+  selector:
+    app: nifi-registry
+  ports:
+    - name: http
+      port: 18080
+      targetPort: 18080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nifi-registry
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "55"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nifi-registry
+  template:
+    metadata:
+      labels:
+        app: nifi-registry
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      containers:
+        - name: nifi-registry
+          image: apache/nifi-registry:1.28.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 18080
+          env:
+            - name: NIFI_REGISTRY_WEB_HTTP_PORT
+              value: "18080"
+          volumeMounts:
+            - name: nifi-registry-data
+              mountPath: /opt/nifi-registry/nifi-registry-current/database
+              subPath: database
+            - name: nifi-registry-data
+              mountPath: /opt/nifi-registry/nifi-registry-current/flow_storage
+              subPath: flow_storage
+      volumes:
+        - name: nifi-registry-data
+          persistentVolumeClaim:
+            claimName: nifi-registry-data

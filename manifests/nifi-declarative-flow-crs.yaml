@@ -1,56 +1,58 @@
-# Declarative NiFi flow management template (NiFiKop external cluster mode)
+# ============================================================================
+# Declarative NiFi flow management (waves 54-58)
+# - Uses NiFiKop external-cluster mode against NiFi in kafka namespace
+# - Keeps NiFi workflows in Git/Kubernetes resources (GitOps source of truth)
 #
-# NOTE: Active GitOps resources now live at:
-#   manifests/nifi-declarative-flow-crs.yaml
-# Keep this file only as a scratch template/reference.
-#
-# Requirements:
-# - NiFiKop operator installed (k8s-kafka/manifests/nifi-kubernetes-operator.yaml)
-# - NiFi API automation auth path (basic or tls)
-# - Versioned flow metadata (bucketId/flowId/flowVersion)
-# - If operator currently watches only `kafka`, extend watch scope to `dataflow`
-#   before applying these CRs in `dataflow` namespace.
+# IMPORTANT
+# 1) Set real values before first production sync:
+#    - rootProcessGroupId
+#    - registry bucket/flow IDs
+#    - TLS client certificate secret values
+# 2) NiFiKop must watch `dataflow` namespace (configured in k8s-kafka repo).
+# ============================================================================
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: nifi-external-cluster-basic-auth
+  name: nifi-external-cluster-tls-auth
   namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "54"
 type: Opaque
 stringData:
-  # NiFi API automation account (non-human account).
-  # NiFiKop basic mode calls /nifi-api/access/token with this username/password.
-  username: "REPLACE_WITH_NIFI_API_USERNAME"
-  password: "REPLACE_WITH_NIFI_API_PASSWORD"
+  # PEM client certificate/key NiFiKop will present to NiFi API.
+  # The cert identity must be authorized in NiFi.
+  tls.crt: |
+    REPLACE_WITH_NIFIKOP_CLIENT_CERT_PEM
+  tls.key: |
+    REPLACE_WITH_NIFIKOP_CLIENT_KEY_PEM
 
-  # PEM trust chain for the NiFi HTTPS certificate presented by
-  # https://nifi.kafka.svc.cluster.local:8443
-  # Leave empty only if cluster trust already contains the NiFi CA.
+  # PEM CA chain used to validate NiFi HTTPS cert.
   ca.crt: |
-    -----BEGIN CERTIFICATE-----
-    REPLACE_WITH_NIFI_CA_CERT
-    -----END CERTIFICATE-----
+    REPLACE_WITH_NIFI_CA_CERT_PEM
 ---
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiCluster
 metadata:
   name: nifi-external
   namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "55"
 spec:
   type: external
-  clientType: basic
+  clientType: tls
 
-  # Single-node NiFi in k8s-kafka namespace.
   nifiURI: "https://nifi.kafka.svc.cluster.local:8443"
   nodeURITemplate: "nifi-%d.nifi-hs.kafka.svc.cluster.local:8443"
   nodes:
     - id: 0
 
-  # Root process group ID from NiFi canvas URL or NiFi API.
-  rootProcessGroupId: "REPLACE_WITH_ROOT_PROCESS_GROUP_ID"
+  # Root Process Group UUID from NiFi:
+  # GET /nifi-api/process-groups/root
+  rootProcessGroupId: "REPLACE_WITH_ROOT_PROCESS_GROUP_UUID"
 
   secretRef:
-    name: nifi-external-cluster-basic-auth
+    name: nifi-external-cluster-tls-auth
     namespace: dataflow
 ---
 apiVersion: nifi.konpyutaika.com/v1
@@ -58,31 +60,30 @@ kind: NifiRegistryClient
 metadata:
   name: batch-flow-registry
   namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "56"
 spec:
   clusterRef:
     name: nifi-external
     namespace: dataflow
-  description: "Registry client for batch platform declarative flows"
-
-  # Use your NiFi Registry endpoint (or equivalent backend reachable by NiFi).
-  uri: "http://nifi-registry.kafka.svc.cluster.local:18080"
+  description: "Registry client for dataflow declarative NiFi workflows"
+  uri: "http://nifi-registry.dataflow.svc.cluster.local:18080"
 ---
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiParameterContext
 metadata:
   name: batch-kafka-context
   namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "57"
 spec:
-  description: "Shared Kafka parameters for batch NiFi flows"
+  description: "Shared Kafka parameters for batch NiFi workflows"
   clusterRef:
     name: nifi-external
     namespace: dataflow
-
-  # Optional: expose secret keys as sensitive parameters by key name.
   secretRefs:
     - name: kafka-security-credentials
       namespace: dataflow
-
   parameters:
     - name: batch.kafka.bootstrap.servers
       value: kafka.kafka.svc.internal.lan:9092
@@ -95,25 +96,28 @@ spec:
       description: Kafka SASL mechanism
     - name: batch.kafka.input.topic
       value: batch.example.nifi.raw.v1
-      description: NiFi to Flink input topic
+      description: NiFi->Flink input topic
     - name: batch.kafka.output.topic
       value: batch.example.flink.enriched.v1
-      description: Flink to NiFi output topic
+      description: Flink->NiFi output topic
 ---
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiDataflow
 metadata:
   name: batch-nifi-kafka-example
   namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "58"
 spec:
   displayName: "batch-nifi-kafka-example"
 
-  # Set to rootProcessGroupId or another parent process group where flow should live.
-  parentProcessGroupID: "REPLACE_WITH_PARENT_PROCESS_GROUP_ID"
+  # Parent process group where flow is deployed.
+  # Usually this is the root process group UUID.
+  parentProcessGroupID: "REPLACE_WITH_PARENT_PROCESS_GROUP_UUID"
 
   # Versioned flow metadata from NiFi Registry.
-  bucketId: "REPLACE_WITH_BUCKET_ID"
-  flowId: "REPLACE_WITH_FLOW_ID"
+  bucketId: "REPLACE_WITH_REGISTRY_BUCKET_UUID"
+  flowId: "REPLACE_WITH_REGISTRY_FLOW_UUID"
   flowVersion: 1
 
   flowPosition:

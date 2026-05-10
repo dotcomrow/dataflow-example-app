@@ -13,12 +13,17 @@ This repo contains only deployable workload manifests. Platform/runtime resource
   - `Job` to seed input topic data
   - `Job` to submit sample Flink SQL pipeline
   - `Job` to verify Flink output is readable by the NiFi Kafka principal
-- `templates/nifi-declarative-flow-crs.yaml`
-  - NiFiKop CR template for declarative NiFi flow lifecycle:
+- `manifests/nifi-declarative-flow-crs.yaml`
+  - NiFiKop declarative CRs for NiFi workflow lifecycle:
     - `NifiCluster` (external mode)
     - `NifiRegistryClient`
     - `NifiParameterContext`
     - `NifiDataflow`
+  - This file is applied by Argo from `manifests/`.
+  - Replace placeholder values in this file before production rollout.
+- `manifests/nifi-registry.yaml`
+  - Internal NiFi Registry deployment + service + PVC
+  - Stores versioned flow definitions consumed by `NifiDataflow` resources
 
 ## End-to-End Example
 
@@ -42,20 +47,19 @@ What remains operator-driven in NiFi UI:
 
 ## Declarative NiFi Flow Path
 
-Use `templates/nifi-declarative-flow-crs.yaml` to move flow management to Kubernetes manifests.
+Use `manifests/nifi-declarative-flow-crs.yaml` for GitOps-managed NiFi workflows.
 
 1. Replace placeholder values:
-   - NiFi API automation credentials and CA cert
+   - TLS auth secret used by NiFiKop (`tls.crt`, `tls.key`, `ca.crt`)
    - root/parent process group IDs
-   - versioned flow `bucketId`, `flowId`, and `flowVersion`
-2. Copy the updated resources into `manifests/` when ready to have Argo deploy them.
-3. Keep `syncMode: always` on `NifiDataflow` once you want Git to be source of truth.
+   - versioned flow `bucketId`, `flowId`, `flowVersion`
+2. Keep `syncMode: always` on `NifiDataflow` to make Git the source of truth.
 
 Notes:
 
 - External-cluster reconciliation needs non-interactive NiFi API auth (`basic` or `tls`).
 - `bucketId` and `flowId` come from NiFi Registry flow metadata (`bucket.yml` / versioned flow metadata).
-- If NiFiKop is watching only `kafka` namespace, extend its watch scope before applying these CRs in `dataflow`.
+- NiFiKop must watch `dataflow` namespace in addition to `kafka`.
 
 ## Deployment
 

@@ -127,6 +127,9 @@ metadata:
     argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: batch-example-kafka-topics
   template:
     metadata:
       labels:
@@ -227,6 +230,9 @@ metadata:
     argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: batch-example-kafka-seed-input
   template:
     metadata:
       labels:
@@ -307,6 +313,9 @@ metadata:
     argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: batch-example-flink-submit
   template:
     metadata:
       labels:
@@ -456,6 +465,9 @@ metadata:
     argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: batch-example-nifi-output-verify
   template:
     metadata:
       labels:
