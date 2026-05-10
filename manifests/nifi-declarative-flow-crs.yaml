@@ -55,7 +55,7 @@ spec:
     name: nifi-external-cluster-tls-auth
     namespace: dataflow
 ---
-apiVersion: nifi.konpyutaika.com/v1
+apiVersion: nifi.konpyutaika.com/v2alpha1
 kind: NifiRegistryClient
 metadata:
   name: batch-flow-registry
@@ -67,7 +67,9 @@ spec:
     name: nifi-external
     namespace: dataflow
   description: "Registry client for dataflow declarative NiFi workflows"
-  uri: "http://nifi-registry.dataflow.svc.cluster.local:18080"
+  type: registry
+  registryClientConfig:
+    uri: "http://nifi-registry.dataflow.svc.cluster.local:18080"
 ---
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiParameterContext
