@@ -27,6 +27,8 @@ stringData:
 
   # PEM CA chain used to validate NiFi HTTPS cert.
   ca.crt: "<path:secret/data/k8s-kafka-nifi-ca-cert-pem#value>"
+  # Required by NiFiKop TLS external-cluster auth contract.
+  password: "<path:secret/data/k8s-kafka-nifi-keystore-password#value>"
 ---
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiCluster
@@ -38,6 +40,7 @@ metadata:
 spec:
   type: external
   clientType: tls
+  rootProcessGroupId: "root"
 
   nifiURI: "nifi.kafka.svc.cluster.local:8443"
   nodeURITemplate: "nifi-%d.nifi-hs.kafka.svc.cluster.local:8443"
@@ -95,50 +98,6 @@ spec:
     - name: batch.kafka.output.topic
       value: batch.example.flink.enriched.v1
       description: Flink->NiFi output topic
----
-apiVersion: nifi.konpyutaika.com/v1
-kind: NifiUser
-metadata:
-  name: nifikop-operator-access
-  namespace: dataflow
-  annotations:
-    argocd.argoproj.io/sync-wave: "58"
-spec:
-  # Must match the subject DN in nifi-external-cluster-tls-auth/tls.crt.
-  identity: "CN=nifi.kafka.svc.cluster.local, OU=Platform, O=Suncoast, L=NA, ST=NA, C=US"
-  createCert: false
-  includeJKS: false
-  clusterRef:
-    name: nifi-external
-    namespace: dataflow
-  accessPolicies:
-    # Root process group component policies required by NifiDataflow reconcile.
-    - type: component
-      action: read
-      resource: /
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: write
-      resource: /
-      componentType: process-groups
-      componentId: ""
-    # Root process group runtime operations used by declarative flow deploy/update.
-    - type: component
-      action: read
-      resource: /data
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: write
-      resource: /data
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: write
-      resource: /operation
-      componentType: process-groups
-      componentId: ""
 ---
 apiVersion: batch/v1
 kind: Job

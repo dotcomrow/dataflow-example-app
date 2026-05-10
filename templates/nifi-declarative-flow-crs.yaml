@@ -99,47 +99,6 @@ spec:
     - name: batch.kafka.output.topic
       value: batch.example.flink.enriched.v1
       description: Flink to NiFi output topic
----
-apiVersion: nifi.konpyutaika.com/v1
-kind: NifiUser
-metadata:
-  name: nifikop-operator-access
-  namespace: dataflow
-spec:
-  # Must match the subject DN in nifi-external-cluster-tls-auth/tls.crt.
-  identity: "CN=nifi.kafka.svc.cluster.local, OU=Platform, O=Suncoast, L=NA, ST=NA, C=US"
-  createCert: false
-  includeJKS: false
-  clusterRef:
-    name: nifi-external
-    namespace: dataflow
-  accessPolicies:
-    - type: component
-      action: read
-      resource: /
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: write
-      resource: /
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: read
-      resource: /data
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: write
-      resource: /data
-      componentType: process-groups
-      componentId: ""
-    - type: component
-      action: write
-      resource: /operation
-      componentType: process-groups
-      componentId: ""
----
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiDataflow
 metadata:
