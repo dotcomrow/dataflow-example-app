@@ -124,12 +124,10 @@ metadata:
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "50"
-    argocd.argoproj.io/sync-options: Force=true,Replace=true
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: batch-example-kafka-topics
   template:
     metadata:
       labels:
@@ -227,12 +225,10 @@ metadata:
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "51"
-    argocd.argoproj.io/sync-options: Force=true,Replace=true
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: batch-example-kafka-seed-input
   template:
     metadata:
       labels:
@@ -310,12 +306,10 @@ metadata:
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "52"
-    argocd.argoproj.io/sync-options: Force=true,Replace=true
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: batch-example-flink-submit
   template:
     metadata:
       labels:
@@ -462,12 +456,10 @@ metadata:
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "53"
-    argocd.argoproj.io/sync-options: Force=true,Replace=true
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: batch-example-nifi-output-verify
   template:
     metadata:
       labels:
