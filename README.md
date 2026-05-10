@@ -18,9 +18,10 @@ This repo contains only deployable workload manifests. Platform/runtime resource
     - `NifiCluster` (external mode)
     - `NifiRegistryClient`
     - `NifiParameterContext`
+    - Registry bootstrap `Job` for `flowVersion: 1`
     - `NifiDataflow`
   - This file is applied by Argo from `manifests/`.
-  - Replace placeholder values in this file before production rollout.
+  - Registry `flowVersion: 1` is created automatically by the bootstrap Job.
 - `manifests/nifi-registry.yaml`
   - Internal NiFi Registry deployment + service + PVC
   - Stores versioned flow definitions consumed by `NifiDataflow` resources
@@ -55,13 +56,13 @@ Use `manifests/nifi-declarative-flow-crs.yaml` for GitOps-managed NiFi workflows
    - `secret/data/k8s-kafka-nifi-ca-cert-pem`
    - `secret/data/k8s-kafka-nifi-registry-bucket-id`
    - `secret/data/k8s-kafka-nifi-registry-flow-id`
-   - `flowVersion` remains manifest-managed (`1` by default)
-2. Keep `syncMode: always` on `NifiDataflow` to make Git the source of truth.
+2. `flowVersion: 1` is bootstrapped automatically if missing.
+3. Keep `syncMode: always` on `NifiDataflow` to make Git the source of truth.
 
 Notes:
 
 - External-cluster reconciliation needs non-interactive NiFi API auth (`basic` or `tls`).
-- `bucketId` and `flowId` come from NiFi Registry flow metadata (`bucket.yml` / versioned flow metadata).
+- `bucketId` and `flowId` come from NiFi Registry flow metadata.
 - NiFiKop must watch `dataflow` namespace in addition to `kafka`.
 
 ## Deployment
