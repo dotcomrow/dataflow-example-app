@@ -236,6 +236,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "59"
 spec:
   displayName: "batch-nifi-kafka-example"
+  parentProcessGroupID: "root"
 
   # Versioned flow metadata from NiFi Registry.
   bucketId: "<path:secret/data/k8s-kafka-nifi-registry-bucket-id#value>"

@@ -108,8 +108,8 @@ metadata:
 spec:
   displayName: "batch-nifi-kafka-example"
 
-  # Set to rootProcessGroupId or another parent process group where flow should live.
-  parentProcessGroupID: "REPLACE_WITH_PARENT_PROCESS_GROUP_ID"
+  # Use the NiFi root process group by default unless you intentionally target a child group.
+  parentProcessGroupID: "root"
 
   # Versioned flow metadata from NiFi Registry.
   bucketId: "REPLACE_WITH_BUCKET_ID"
