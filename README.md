@@ -49,10 +49,13 @@ What remains operator-driven in NiFi UI:
 
 Use `manifests/nifi-declarative-flow-crs.yaml` for GitOps-managed NiFi workflows.
 
-1. Replace placeholder values:
-   - TLS auth secret used by NiFiKop (`tls.crt`, `tls.key`, `ca.crt`)
-   - root/parent process group IDs
-   - versioned flow `bucketId`, `flowId`, `flowVersion`
+1. Provide required secrets for the declarative CR file:
+   - `secret/data/k8s-kafka-nifikop-client-cert-pem`
+   - `secret/data/k8s-kafka-nifikop-client-key-pem`
+   - `secret/data/k8s-kafka-nifi-ca-cert-pem`
+   - `secret/data/k8s-kafka-nifi-registry-bucket-id`
+   - `secret/data/k8s-kafka-nifi-registry-flow-id`
+   - `flowVersion` remains manifest-managed (`1` by default)
 2. Keep `syncMode: always` on `NifiDataflow` to make Git the source of truth.
 
 Notes:

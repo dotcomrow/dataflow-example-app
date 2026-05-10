@@ -5,7 +5,6 @@
 #
 # IMPORTANT
 # 1) Set real values before first production sync:
-#    - rootProcessGroupId
 #    - registry bucket/flow IDs
 #    - TLS client certificate secret values
 # 2) NiFiKop must watch `dataflow` namespace (configured in k8s-kafka repo).
@@ -22,14 +21,11 @@ type: Opaque
 stringData:
   # PEM client certificate/key NiFiKop will present to NiFi API.
   # The cert identity must be authorized in NiFi.
-  tls.crt: |
-    REPLACE_WITH_NIFIKOP_CLIENT_CERT_PEM
-  tls.key: |
-    REPLACE_WITH_NIFIKOP_CLIENT_KEY_PEM
+  tls.crt: "<path:secret/data/k8s-kafka-nifikop-client-cert-pem#value>"
+  tls.key: "<path:secret/data/k8s-kafka-nifikop-client-key-pem#value>"
 
   # PEM CA chain used to validate NiFi HTTPS cert.
-  ca.crt: |
-    REPLACE_WITH_NIFI_CA_CERT_PEM
+  ca.crt: "<path:secret/data/k8s-kafka-nifi-ca-cert-pem#value>"
 ---
 apiVersion: nifi.konpyutaika.com/v1
 kind: NifiCluster
@@ -46,10 +42,6 @@ spec:
   nodeURITemplate: "nifi-%d.nifi-hs.kafka.svc.cluster.local:8443"
   nodes:
     - id: 0
-
-  # Root Process Group UUID from NiFi:
-  # GET /nifi-api/process-groups/root
-  rootProcessGroupId: "REPLACE_WITH_ROOT_PROCESS_GROUP_UUID"
 
   secretRef:
     name: nifi-external-cluster-tls-auth
@@ -113,13 +105,9 @@ metadata:
 spec:
   displayName: "batch-nifi-kafka-example"
 
-  # Parent process group where flow is deployed.
-  # Usually this is the root process group UUID.
-  parentProcessGroupID: "REPLACE_WITH_PARENT_PROCESS_GROUP_UUID"
-
   # Versioned flow metadata from NiFi Registry.
-  bucketId: "REPLACE_WITH_REGISTRY_BUCKET_UUID"
-  flowId: "REPLACE_WITH_REGISTRY_FLOW_UUID"
+  bucketId: "<path:secret/data/k8s-kafka-nifi-registry-bucket-id#value>"
+  flowId: "<path:secret/data/k8s-kafka-nifi-registry-flow-id#value>"
   flowVersion: 1
 
   flowPosition:
