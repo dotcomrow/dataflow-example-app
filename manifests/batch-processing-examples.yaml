@@ -1,9 +1,9 @@
 # ============================================================================
-# Batch processing examples (waves 50-53)
-# - Kafka example topics and seed data
-# - Flink SQL job submission for Kafka input/output pipeline
-# - NiFi flow reference document (produce + consume chains)
-# - Output verification as NiFi principal
+# Batch processing examples (waves 50-54)
+# - Kafka staged topics and seed data
+# - Two Flink SQL stage jobs (continuous streaming)
+# - NiFi reference chains that bridge Flink stages through Kafka
+# - Final output verification as NiFi principal
 # ============================================================================
 ---
 apiVersion: v1
@@ -42,11 +42,19 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "50"
 data:
-  input_topic: "batch.example.nifi.raw.v1"
-  output_topic: "batch.example.flink.enriched.v1"
-  input_consumer_group: "flink-batch-example-v1"
-  nifi_output_consumer_group: "nifi-batch-example-output-v1"
-  flink_pipeline_name: "batch-example-nifi-to-flink"
+  topic_flink_stage1_input: "batch.example.stage1.input.v1"
+  topic_flink_stage1_to_nifi_stage1: "batch.example.stage1.flink-to-nifi.v1"
+  topic_nifi_stage1_to_flink_stage2: "batch.example.stage2.nifi-to-flink.v1"
+  topic_flink_stage2_to_nifi_stage2: "batch.example.stage2.flink-to-nifi.v1"
+  topic_nifi_stage2_final: "batch.example.stage3.nifi-final.v1"
+
+  flink_stage1_consumer_group: "flink-batch-stage1-v1"
+  flink_stage2_consumer_group: "flink-batch-stage2-v1"
+  nifi_stage1_consumer_group: "nifi-batch-stage1-v1"
+  nifi_stage2_consumer_group: "nifi-batch-stage2-v1"
+
+  flink_stage1_pipeline_name: "batch-example-flink-stage1"
+  flink_stage2_pipeline_name: "batch-example-flink-stage2"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -57,81 +65,93 @@ metadata:
     argocd.argoproj.io/sync-wave: "50"
 data:
   kafka-batch-reference.md: |-
-    # NiFi + Flink + Kafka Example Flow (Reference)
+    # Multi-Stage Flink + NiFi + Kafka Example (Reference)
 
-    This reference lives in the `dataflow` namespace for operators to copy into NiFi.
-    It documents a minimal end-to-end example where:
-    1. NiFi publishes to Kafka input topic.
-    2. Flink consumes input topic and writes enriched records to output topic.
-    3. NiFi consumes Flink output topic for downstream handling.
+    This reference lives in the `dataflow` namespace as documentation for the
+    declarative NiFi bootstrap Job in `nifi-declarative-flow-crs.yaml`.
+    The stage-1 and stage-2 NiFi chains are created/updated automatically.
+    It models a chained topology:
 
-    ## Topics
-    - NiFi -> Flink input: `batch.example.nifi.raw.v1`
-    - Flink -> NiFi output: `batch.example.flink.enriched.v1`
+    1. Flink stage 1 consumes topic A and writes topic B.
+    2. NiFi stage 1 consumes topic B, does simple transformation, writes topic C.
+    3. Flink stage 2 consumes topic C and writes topic D.
+    4. NiFi stage 2 consumes topic D, does simple transformation, writes topic E.
 
-    ## Chain A: NiFi producer flow (into Flink)
-    1. `GenerateFlowFile`
-    2. `UpdateAttribute`
+    ## Topic chain
+    - Topic A: `batch.example.stage1.input.v1`
+    - Topic B: `batch.example.stage1.flink-to-nifi.v1`
+    - Topic C: `batch.example.stage2.nifi-to-flink.v1`
+    - Topic D: `batch.example.stage2.flink-to-nifi.v1`
+    - Topic E: `batch.example.stage3.nifi-final.v1`
+
+    ## NiFi Stage 1 flow (B -> C)
+    1. `ConsumeKafka_2_6`
+    2. `ReplaceText` (prepend `nifi-stage1|`)
     3. `PublishKafka_2_6`
 
-    ## Suggested processor properties
-
-    `GenerateFlowFile`
-    - Run Schedule: `15 sec`
-    - Custom Text:
-      `event_source=nifi|event_time=${now():format("yyyy-MM-dd'T'HH:mm:ssXXX")}|event_id=${UUID()}`
-
-    `UpdateAttribute`
-    - `kafka.topic`: `batch.example.nifi.raw.v1`
-
-    `PublishKafka_2_6`
-    - Topic Name: `${kafka.topic}`
-    - Delivery Guarantee: `at_least_once`
-    - request.timeout.ms: `30000`
-    - max.block.ms: `60000`
-    - Security Protocol: `${BATCH_KAFKA_SECURITY_PROTOCOL}`
-    - SASL Mechanism: `${BATCH_KAFKA_SASL_MECHANISM}`
-    - SASL JAAS Config:
-      `org.apache.kafka.common.security.scram.ScramLoginModule required username="${BATCH_KAFKA_USERNAME}" password="${BATCH_KAFKA_PASSWORD}";`
-    - bootstrap.servers:
-      `${BATCH_KAFKA_BOOTSTRAP_SERVERS}`
-
-    ## Chain B: NiFi consumer flow (from Flink output)
-    1. `ConsumeKafka_2_6`
-    2. `RouteOnAttribute` (optional rules)
-    3. `LogAttribute` (or your real sink processor)
+    Processor properties applied declaratively:
 
     `ConsumeKafka_2_6`
-    - Topic Name Format: `names`
-    - Topics: `batch.example.flink.enriched.v1`
-    - Group ID: `nifi-batch-example-output-v1`
-    - Security Protocol: `${BATCH_KAFKA_SECURITY_PROTOCOL}`
-    - SASL Mechanism: `${BATCH_KAFKA_SASL_MECHANISM}`
-    - SASL JAAS Config:
-      `org.apache.kafka.common.security.scram.ScramLoginModule required username="${BATCH_KAFKA_USERNAME}" password="${BATCH_KAFKA_PASSWORD}";`
-    - bootstrap.servers:
-      `${BATCH_KAFKA_BOOTSTRAP_SERVERS}`
+    - Topics: `batch.example.stage1.flink-to-nifi.v1`
+    - Group ID: `nifi-batch-stage1-v1`
+    - bootstrap.servers: `#{batch.kafka.bootstrap.servers}`
+    - security.protocol: `#{batch.kafka.security.protocol}`
+    - sasl.mechanism: `#{batch.kafka.sasl.mechanism}`
+    - sasl.jaas.config:
+      `org.apache.kafka.common.security.scram.ScramLoginModule required username="${kafka-security-credentials:nifi_username}" password="${kafka-security-credentials:nifi_password}";`
 
-    ## Verify end-to-end
-    - Run Chain A in NiFi.
-    - Confirm Flink output topic receives `flink-processed|...` records.
-    - Run Chain B and verify NiFi receives those records.
+    `ReplaceText`
+    - Replacement Strategy: `Prepend`
+    - Replacement Value: `nifi-stage1|`
+
+    `PublishKafka_2_6`
+    - Topic Name: `batch.example.stage2.nifi-to-flink.v1`
+    - bootstrap.servers: `#{batch.kafka.bootstrap.servers}`
+    - security.protocol: `#{batch.kafka.security.protocol}`
+    - sasl.mechanism: `#{batch.kafka.sasl.mechanism}`
+
+    ## NiFi Stage 2 flow (D -> E)
+    1. `ConsumeKafka_2_6`
+    2. `ReplaceText` (prepend `nifi-stage2|`)
+    3. `PublishKafka_2_6`
+
+    Processor properties applied declaratively:
+
+    `ConsumeKafka_2_6`
+    - Topics: `batch.example.stage2.flink-to-nifi.v1`
+    - Group ID: `nifi-batch-stage2-v1`
+    - bootstrap.servers: `#{batch.kafka.bootstrap.servers}`
+    - security.protocol: `#{batch.kafka.security.protocol}`
+    - sasl.mechanism: `#{batch.kafka.sasl.mechanism}`
+
+    `ReplaceText`
+    - Replacement Strategy: `Prepend`
+    - Replacement Value: `nifi-stage2|`
+
+    `PublishKafka_2_6`
+    - Topic Name: `batch.example.stage3.nifi-final.v1`
+
+    ## Verification
+    - Seed Topic A with this repo Job.
+    - Confirm stage records advance across topics B/C/D/E.
+    - Use the final verification Job to consume sample records from topic E.
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: batch-example-kafka-topics
+  name: batch-example-kafka-topics-v3
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "50"
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 3
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: batch-example-kafka-topics
+        app.kubernetes.io/name: batch-example-kafka-topics-v3
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -165,27 +185,42 @@ spec:
                 secretKeyRef:
                   name: kafka-security-credentials
                   key: admin_password
-            - name: INPUT_TOPIC
+            - name: TOPIC_STAGE1_INPUT
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: input_topic
-            - name: OUTPUT_TOPIC
+                  key: topic_flink_stage1_input
+            - name: TOPIC_STAGE1_FLINK_TO_NIFI
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: output_topic
+                  key: topic_flink_stage1_to_nifi_stage1
+            - name: TOPIC_STAGE2_NIFI_TO_FLINK
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_nifi_stage1_to_flink_stage2
+            - name: TOPIC_STAGE2_FLINK_TO_NIFI
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_flink_stage2_to_nifi_stage2
+            - name: TOPIC_FINAL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_nifi_stage2_final
           command: ["/bin/bash", "-lc"]
           args:
             - |
               set -euo pipefail
 
               CLIENT_CFG="/tmp/kafka-admin.properties"
-              cat > "${CLIENT_CFG}" <<EOF
+              cat > "${CLIENT_CFG}" <<EOF_KAFKA
               security.protocol=${KAFKA_SECURITY_PROTOCOL}
               sasl.mechanism=${KAFKA_SASL_MECHANISM}
               sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
-              EOF
+              EOF_KAFKA
 
               echo "Waiting for Kafka API..."
               until /opt/kafka/bin/kafka-topics.sh \
@@ -214,31 +249,36 @@ spec:
                 fi
               }
 
-              ensure_topic "${INPUT_TOPIC}"
-              ensure_topic "${OUTPUT_TOPIC}"
-              echo "Kafka example topics are ready."
+              ensure_topic "${TOPIC_STAGE1_INPUT}"
+              ensure_topic "${TOPIC_STAGE1_FLINK_TO_NIFI}"
+              ensure_topic "${TOPIC_STAGE2_NIFI_TO_FLINK}"
+              ensure_topic "${TOPIC_STAGE2_FLINK_TO_NIFI}"
+              ensure_topic "${TOPIC_FINAL}"
+
+              echo "Kafka staged example topics are ready."
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: batch-example-kafka-seed-input
+  name: batch-example-kafka-seed-stage1-v3
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "51"
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 3
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: batch-example-kafka-seed-input
+        app.kubernetes.io/name: batch-example-kafka-seed-stage1-v3
       annotations:
         linkerd.io/inject: "disabled"
     spec:
       restartPolicy: OnFailure
       containers:
-        - name: seed-input-topic
+        - name: seed-stage1-topic
           image: apache/kafka:3.9.0
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
@@ -266,60 +306,61 @@ spec:
                 secretKeyRef:
                   name: kafka-security-credentials
                   key: nifi_password
-            - name: INPUT_TOPIC
+            - name: TOPIC_STAGE1_INPUT
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: input_topic
+                  key: topic_flink_stage1_input
           command: ["/bin/bash", "-lc"]
           args:
             - |
               set -euo pipefail
 
               CLIENT_CFG="/tmp/kafka-nifi.properties"
-              cat > "${CLIENT_CFG}" <<EOF
+              cat > "${CLIENT_CFG}" <<EOF_KAFKA
               security.protocol=${KAFKA_SECURITY_PROTOCOL}
               sasl.mechanism=${KAFKA_SASL_MECHANISM}
               sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_NIFI_USERNAME}" password="${KAFKA_NIFI_PASSWORD}";
-              EOF
+              EOF_KAFKA
 
-              echo "Seeding ${INPUT_TOPIC} with example records as NiFi principal..."
-              tmp_payload="$(mktemp)"
+              echo "Seeding ${TOPIC_STAGE1_INPUT} with example records..."
+              payload_file="$(mktemp)"
               for i in $(seq 1 25); do
-                printf 'event_source=nifi-seed|event_index=%03d|event_time=%s|event_id=%s\n' \
+                printf 'event_source=batch-seed|event_stage=0|event_index=%03d|event_time=%s|event_id=%s\n' \
                   "${i}" \
                   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                  "$(cat /proc/sys/kernel/random/uuid)" >> "${tmp_payload}"
+                  "$(cat /proc/sys/kernel/random/uuid)" >> "${payload_file}"
               done
 
               /opt/kafka/bin/kafka-console-producer.sh \
                 --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
                 --producer.config "${CLIENT_CFG}" \
-                --topic "${INPUT_TOPIC}" < "${tmp_payload}"
+                --topic "${TOPIC_STAGE1_INPUT}" < "${payload_file}"
 
-              echo "Seed data written to ${INPUT_TOPIC}."
+              echo "Seed data written to ${TOPIC_STAGE1_INPUT}."
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: batch-example-flink-submit
+  name: batch-example-flink-stage1-submit-v3
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "52"
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 3
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: batch-example-flink-submit
+        app.kubernetes.io/name: batch-example-flink-stage1-submit-v3
       annotations:
         linkerd.io/inject: "disabled"
     spec:
       restartPolicy: OnFailure
       containers:
-        - name: submit-flink-job
+        - name: submit-flink-stage1
           image: flink:1.20.3-scala_2.12-java17
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
@@ -351,22 +392,22 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: input_topic
+                  key: topic_flink_stage1_input
             - name: OUTPUT_TOPIC
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: output_topic
+                  key: topic_flink_stage1_to_nifi_stage1
             - name: INPUT_CONSUMER_GROUP
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: input_consumer_group
+                  key: flink_stage1_consumer_group
             - name: FLINK_PIPELINE_NAME
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: flink_pipeline_name
+                  key: flink_stage1_pipeline_name
           command: ["/bin/bash", "-lc"]
           args:
             - |
@@ -407,11 +448,11 @@ spec:
                 fi
               fi
 
-              cat > /tmp/batch-example.sql <<EOF
+              cat > /tmp/batch-example-stage1.sql <<EOF_SQL
               ADD JAR 'file://${CONNECTOR_JAR_PATH}';
               SET 'pipeline.name' = '${FLINK_PIPELINE_NAME}';
 
-              CREATE TABLE nifi_input (
+              CREATE TABLE stage1_input (
                 raw_line STRING
               ) WITH (
                 'connector' = 'kafka',
@@ -425,7 +466,7 @@ spec:
                 'format' = 'raw'
               );
 
-              CREATE TABLE flink_output (
+              CREATE TABLE stage1_output (
                 raw_line STRING
               ) WITH (
                 'connector' = 'kafka',
@@ -437,39 +478,193 @@ spec:
                 'format' = 'raw'
               );
 
-              INSERT INTO flink_output
-              SELECT CONCAT('flink-processed|', raw_line)
-              FROM nifi_input;
-              EOF
+              INSERT INTO stage1_output
+              SELECT CONCAT('flink-stage1|', raw_line)
+              FROM stage1_input;
+              EOF_SQL
 
-              echo "Submitting Flink SQL pipeline from /tmp/batch-example.sql"
+              echo "Submitting Flink stage 1 SQL pipeline..."
               /opt/flink/bin/sql-client.sh \
                 -Drest.address=flink-rest.kafka.svc.cluster.local \
                 -Drest.port=8081 \
-                -f /tmp/batch-example.sql
-              echo "Flink SQL submission completed."
+                -f /tmp/batch-example-stage1.sql
+
+              echo "Flink stage 1 SQL submission completed."
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: batch-example-nifi-output-verify
+  name: batch-example-flink-stage2-submit-v3
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "53"
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 3
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: batch-example-nifi-output-verify
+        app.kubernetes.io/name: batch-example-flink-stage2-submit-v3
       annotations:
         linkerd.io/inject: "disabled"
     spec:
       restartPolicy: OnFailure
       containers:
-        - name: verify-flink-output-as-nifi
+        - name: submit-flink-stage2
+          image: flink:1.20.3-scala_2.12-java17
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: bootstrap_servers
+            - name: KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: security_protocol
+            - name: KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: sasl_mechanism
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: flink_username
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: flink_password
+            - name: INPUT_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_nifi_stage1_to_flink_stage2
+            - name: OUTPUT_TOPIC
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_flink_stage2_to_nifi_stage2
+            - name: INPUT_CONSUMER_GROUP
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: flink_stage2_consumer_group
+            - name: FLINK_PIPELINE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: flink_stage2_pipeline_name
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              FLINK_REST="http://flink-rest.kafka.svc.cluster.local:8081"
+              CONNECTOR_JAR_URL="https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.3.0-1.20/flink-sql-connector-kafka-3.3.0-1.20.jar"
+              CONNECTOR_JAR_PATH="/tmp/flink-sql-connector-kafka-3.3.0-1.20.jar"
+
+              http_probe() {
+                local url="$1"
+                if command -v curl >/dev/null 2>&1; then
+                  curl -fsS "${url}" >/dev/null
+                elif command -v wget >/dev/null 2>&1; then
+                  wget -qO- "${url}" >/dev/null
+                else
+                  echo "Neither curl nor wget is available in the container."
+                  exit 1
+                fi
+              }
+
+              echo "Waiting for Flink JobManager REST API..."
+              until http_probe "${FLINK_REST}/overview"; do
+                sleep 5
+              done
+
+              if [ ! -f "${CONNECTOR_JAR_PATH}" ]; then
+                echo "Downloading Flink Kafka SQL connector..."
+                if command -v curl >/dev/null 2>&1; then
+                  curl -fL --retry 5 --retry-delay 2 \
+                    "${CONNECTOR_JAR_URL}" \
+                    -o "${CONNECTOR_JAR_PATH}"
+                elif command -v wget >/dev/null 2>&1; then
+                  wget -O "${CONNECTOR_JAR_PATH}" "${CONNECTOR_JAR_URL}"
+                else
+                  echo "Neither curl nor wget is available in the container."
+                  exit 1
+                fi
+              fi
+
+              cat > /tmp/batch-example-stage2.sql <<EOF_SQL
+              ADD JAR 'file://${CONNECTOR_JAR_PATH}';
+              SET 'pipeline.name' = '${FLINK_PIPELINE_NAME}';
+
+              CREATE TABLE stage2_input (
+                raw_line STRING
+              ) WITH (
+                'connector' = 'kafka',
+                'topic' = '${INPUT_TOPIC}',
+                'properties.bootstrap.servers' = '${KAFKA_BOOTSTRAP_SERVERS}',
+                'properties.group.id' = '${INPUT_CONSUMER_GROUP}',
+                'properties.security.protocol' = '${KAFKA_SECURITY_PROTOCOL}',
+                'properties.sasl.mechanism' = '${KAFKA_SASL_MECHANISM}',
+                'properties.sasl.jaas.config' = 'org.apache.flink.kafka.shaded.org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME}" password="${KAFKA_PASSWORD}";',
+                'scan.startup.mode' = 'earliest-offset',
+                'format' = 'raw'
+              );
+
+              CREATE TABLE stage2_output (
+                raw_line STRING
+              ) WITH (
+                'connector' = 'kafka',
+                'topic' = '${OUTPUT_TOPIC}',
+                'properties.bootstrap.servers' = '${KAFKA_BOOTSTRAP_SERVERS}',
+                'properties.security.protocol' = '${KAFKA_SECURITY_PROTOCOL}',
+                'properties.sasl.mechanism' = '${KAFKA_SASL_MECHANISM}',
+                'properties.sasl.jaas.config' = 'org.apache.flink.kafka.shaded.org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME}" password="${KAFKA_PASSWORD}";',
+                'format' = 'raw'
+              );
+
+              INSERT INTO stage2_output
+              SELECT CONCAT('flink-stage2|', raw_line)
+              FROM stage2_input;
+              EOF_SQL
+
+              echo "Submitting Flink stage 2 SQL pipeline..."
+              /opt/flink/bin/sql-client.sh \
+                -Drest.address=flink-rest.kafka.svc.cluster.local \
+                -Drest.port=8081 \
+                -f /tmp/batch-example-stage2.sql
+
+              echo "Flink stage 2 SQL submission completed."
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-example-final-verify-v3
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "54"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: batch-example-final-verify-v3
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: verify-final-topic-as-nifi
           image: apache/kafka:3.9.0
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
@@ -497,46 +692,46 @@ spec:
                 secretKeyRef:
                   name: kafka-security-credentials
                   key: nifi_password
-            - name: OUTPUT_TOPIC
+            - name: FINAL_TOPIC
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: output_topic
-            - name: NIFI_OUTPUT_CONSUMER_GROUP
+                  key: topic_nifi_stage2_final
+            - name: NIFI_STAGE2_CONSUMER_GROUP
               valueFrom:
                 configMapKeyRef:
                   name: batch-processing-examples-config
-                  key: nifi_output_consumer_group
+                  key: nifi_stage2_consumer_group
           command: ["/bin/bash", "-lc"]
           args:
             - |
               set -euo pipefail
 
               CLIENT_CFG="/tmp/kafka-nifi-consumer.properties"
-              cat > "${CLIENT_CFG}" <<EOF
+              cat > "${CLIENT_CFG}" <<EOF_KAFKA
               security.protocol=${KAFKA_SECURITY_PROTOCOL}
               sasl.mechanism=${KAFKA_SASL_MECHANISM}
               sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_NIFI_USERNAME}" password="${KAFKA_NIFI_PASSWORD}";
-              group.id=${NIFI_OUTPUT_CONSUMER_GROUP}
+              group.id=${NIFI_STAGE2_CONSUMER_GROUP}
               auto.offset.reset=earliest
-              EOF
+              EOF_KAFKA
 
-              echo "Verifying Flink output topic ${OUTPUT_TOPIC} is readable as NiFi principal..."
+              echo "Verifying final topic ${FINAL_TOPIC} as NiFi principal..."
               output_file="$(mktemp)"
               /opt/kafka/bin/kafka-console-consumer.sh \
                 --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
                 --consumer.config "${CLIENT_CFG}" \
-                --topic "${OUTPUT_TOPIC}" \
-                --timeout-ms 20000 \
+                --topic "${FINAL_TOPIC}" \
+                --timeout-ms 25000 \
                 --max-messages 10 > "${output_file}" || true
 
               if [ ! -s "${output_file}" ]; then
-                echo "No records observed on ${OUTPUT_TOPIC} for NiFi principal yet."
-                echo "Expected after Flink submit: records prefixed with flink-processed|"
+                echo "No final-stage records observed on ${FINAL_TOPIC} yet."
+                echo "This usually means one or both NiFi chains are not running yet."
                 echo "Continuing without failure so Argo sync is not blocked."
                 exit 0
               fi
 
-              echo "Sample records from ${OUTPUT_TOPIC}:"
+              echo "Sample records from ${FINAL_TOPIC}:"
               cat "${output_file}"
-              echo "Verification successful."
+              echo "Final-stage verification successful."

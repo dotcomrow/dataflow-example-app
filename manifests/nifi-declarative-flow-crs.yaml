@@ -1,5 +1,5 @@
 # ============================================================================
-# Declarative NiFi flow management (waves 54-59)
+# Declarative NiFi flow management (waves 60-66)
 # - Uses NiFiKop external-cluster mode against NiFi in kafka namespace
 # - Keeps NiFi workflows in Git/Kubernetes resources (GitOps source of truth)
 #
@@ -17,7 +17,7 @@ metadata:
   name: nifi-external-cluster-tls-auth
   namespace: dataflow
   annotations:
-    argocd.argoproj.io/sync-wave: "54"
+    argocd.argoproj.io/sync-wave: "60"
 type: Opaque
 stringData:
   # PEM client certificate/key NiFiKop will present to NiFi API.
@@ -36,7 +36,7 @@ metadata:
   name: nifi-external
   namespace: dataflow
   annotations:
-    argocd.argoproj.io/sync-wave: "55"
+    argocd.argoproj.io/sync-wave: "61"
 spec:
   type: external
   clientType: tls
@@ -57,7 +57,7 @@ metadata:
   name: batch-flow-registry
   namespace: dataflow
   annotations:
-    argocd.argoproj.io/sync-wave: "56"
+    argocd.argoproj.io/sync-wave: "62"
 spec:
   clusterRef:
     name: nifi-external
@@ -73,7 +73,7 @@ metadata:
   name: batch-kafka-context
   namespace: dataflow
   annotations:
-    argocd.argoproj.io/sync-wave: "57"
+    argocd.argoproj.io/sync-wave: "63"
 spec:
   description: "Shared Kafka parameters for batch NiFi workflows"
   clusterRef:
@@ -92,12 +92,27 @@ spec:
     - name: batch.kafka.sasl.mechanism
       value: SCRAM-SHA-256
       description: Kafka SASL mechanism
-    - name: batch.kafka.input.topic
-      value: batch.example.nifi.raw.v1
-      description: NiFi->Flink input topic
-    - name: batch.kafka.output.topic
-      value: batch.example.flink.enriched.v1
-      description: Flink->NiFi output topic
+    - name: batch.kafka.stage1.input.topic
+      value: batch.example.stage1.input.v1
+      description: Flink stage 1 input topic
+    - name: batch.kafka.stage1.flink_to_nifi.topic
+      value: batch.example.stage1.flink-to-nifi.v1
+      description: Flink stage 1 output topic consumed by NiFi stage 1
+    - name: batch.kafka.stage2.nifi_to_flink.topic
+      value: batch.example.stage2.nifi-to-flink.v1
+      description: NiFi stage 1 output topic consumed by Flink stage 2
+    - name: batch.kafka.stage2.flink_to_nifi.topic
+      value: batch.example.stage2.flink-to-nifi.v1
+      description: Flink stage 2 output topic consumed by NiFi stage 2
+    - name: batch.kafka.final.topic
+      value: batch.example.stage3.nifi-final.v1
+      description: Final output topic from NiFi stage 2
+    - name: batch.kafka.stage1.nifi.group.id
+      value: nifi-batch-stage1-v1
+      description: NiFi stage 1 consumer group
+    - name: batch.kafka.stage2.nifi.group.id
+      value: nifi-batch-stage2-v1
+      description: NiFi stage 2 consumer group
 ---
 apiVersion: batch/v1
 kind: Job
@@ -105,7 +120,7 @@ metadata:
   name: batch-nifi-registry-bootstrap-version
   namespace: dataflow
   annotations:
-    argocd.argoproj.io/sync-wave: "58"
+    argocd.argoproj.io/sync-wave: "64"
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
@@ -236,7 +251,7 @@ metadata:
   name: batch-nifi-kafka-example
   namespace: dataflow
   annotations:
-    argocd.argoproj.io/sync-wave: "59"
+    argocd.argoproj.io/sync-wave: "65"
 spec:
   displayName: "batch-nifi-kafka-example"
   parentProcessGroupID: "root"
@@ -250,7 +265,9 @@ spec:
     posX: 0
     posY: 0
 
-  syncMode: always
+  # Keep dataflow import declarative but avoid continuous overwrite so
+  # manifest-driven bootstrap jobs can manage in-group processor topology.
+  syncMode: once
   updateStrategy: drain
   skipInvalidControllerService: true
   skipInvalidComponent: true
@@ -264,3 +281,410 @@ spec:
   parameterContextRef:
     name: batch-kafka-context
     namespace: dataflow
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-nifi-stage-chain-bootstrap-v1
+  namespace: dataflow
+  annotations:
+    argocd.argoproj.io/sync-wave: "66"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: batch-nifi-stage-chain-bootstrap-v1
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        - name: nifi-tls
+          secret:
+            secretName: nifi-external-cluster-tls-auth
+      containers:
+        - name: bootstrap-nifi-stage-chain
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: nifi-tls
+              mountPath: /tls
+              readOnly: true
+          env:
+            - name: NIFI_API_BASE
+              value: "https://nifi.kafka.svc.cluster.local:8443/nifi-api"
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: bootstrap_servers
+            - name: KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: security_protocol
+            - name: KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: sasl_mechanism
+            - name: KAFKA_NIFI_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: nifi_username
+            - name: KAFKA_NIFI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: nifi_password
+            - name: TOPIC_STAGE1_FLINK_TO_NIFI
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_flink_stage1_to_nifi_stage1
+            - name: TOPIC_STAGE2_NIFI_TO_FLINK
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_nifi_stage1_to_flink_stage2
+            - name: TOPIC_STAGE2_FLINK_TO_NIFI
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_flink_stage2_to_nifi_stage2
+            - name: TOPIC_FINAL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: topic_nifi_stage2_final
+            - name: NIFI_STAGE1_CONSUMER_GROUP
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: nifi_stage1_consumer_group
+            - name: NIFI_STAGE2_CONSUMER_GROUP
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: nifi_stage2_consumer_group
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              apk add --no-cache curl jq >/dev/null
+
+              log() {
+                echo "⏱️  $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
+              }
+
+              nifi_get() {
+                local path="$1"
+                if curl -sS --fail-with-body \
+                  --cacert /tls/ca.crt \
+                  --cert /tls/tls.crt \
+                  --key /tls/tls.key \
+                  "${NIFI_API_BASE}${path}" >/tmp/nifi-get.json 2>/tmp/nifi-get.err; then
+                  cat /tmp/nifi-get.json
+                  return 0
+                fi
+                curl -sS --fail-with-body --insecure \
+                  --cert /tls/tls.crt \
+                  --key /tls/tls.key \
+                  "${NIFI_API_BASE}${path}"
+              }
+
+              nifi_json() {
+                local method="$1"
+                local path="$2"
+                local payload_file="$3"
+                if curl -sS --fail-with-body \
+                  --cacert /tls/ca.crt \
+                  --cert /tls/tls.crt \
+                  --key /tls/tls.key \
+                  -H "Content-Type: application/json" \
+                  -X "${method}" \
+                  "${NIFI_API_BASE}${path}" \
+                  --data @"${payload_file}" >/tmp/nifi-json.json 2>/tmp/nifi-json.err; then
+                  cat /tmp/nifi-json.json
+                  return 0
+                fi
+                curl -sS --fail-with-body --insecure \
+                  --cert /tls/tls.crt \
+                  --key /tls/tls.key \
+                  -H "Content-Type: application/json" \
+                  -X "${method}" \
+                  "${NIFI_API_BASE}${path}" \
+                  --data @"${payload_file}"
+              }
+
+              log "Waiting for NiFi API and processor catalog..."
+              ready="false"
+              for _ in $(seq 1 180); do
+                if nifi_get "/flow/processor-types" >/tmp/nifi-processor-types.json 2>/tmp/nifi-api.err; then
+                  ready="true"
+                  break
+                fi
+                sleep 5
+              done
+              if [ "${ready}" != "true" ]; then
+                log "NiFi API did not become ready."
+                cat /tmp/nifi-api.err || true
+                exit 1
+              fi
+
+              root_children="$(nifi_get "/process-groups/root/process-groups")"
+              TARGET_PG_ID="$(echo "${root_children}" | jq -r '.processGroups[]? | select(.component.name=="batch-nifi-kafka-example") | .id' | head -n1)"
+              if [ -z "${TARGET_PG_ID}" ] || [ "${TARGET_PG_ID}" = "null" ]; then
+                log "Target process group batch-nifi-kafka-example not found under root."
+                echo "${root_children}" | jq '.processGroups[]?.component.name' || true
+                exit 1
+              fi
+              log "Target process group id: ${TARGET_PG_ID}"
+
+              get_processor_id() {
+                local proc_name="$1"
+                nifi_get "/process-groups/${TARGET_PG_ID}/processors" \
+                  | jq -r --arg n "${proc_name}" '.processors[]? | select(.component.name==$n) | .id' \
+                  | head -n1
+              }
+
+              get_processor_version() {
+                local proc_id="$1"
+                nifi_get "/processors/${proc_id}" | jq -r '.revision.version'
+              }
+
+              ensure_processor() {
+                local proc_name="$1"
+                local proc_type="$2"
+                local pos_x="$3"
+                local pos_y="$4"
+                local existing_id=""
+                local payload="/tmp/create-${proc_name}.json"
+                existing_id="$(get_processor_id "${proc_name}" || true)"
+                if [ -n "${existing_id}" ] && [ "${existing_id}" != "null" ]; then
+                  echo "${existing_id}"
+                  return 0
+                fi
+
+                jq -n \
+                  --arg name "${proc_name}" \
+                  --arg type "${proc_type}" \
+                  --argjson x "${pos_x}" \
+                  --argjson y "${pos_y}" \
+                  '{
+                    revision: {version: 0},
+                    component: {
+                      name: $name,
+                      type: $type,
+                      position: {x: $x, y: $y}
+                    }
+                  }' > "${payload}"
+
+                log "Creating processor ${proc_name}"
+                nifi_json "POST" "/process-groups/${TARGET_PG_ID}/processors" "${payload}" >/tmp/create-processor-response.json
+                cat /tmp/create-processor-response.json | jq -r '.id // .component.id'
+              }
+
+              ensure_processor_properties() {
+                local proc_id="$1"
+                local properties_json="$2"
+                local auto_terminated_json="$3"
+                local payload="/tmp/update-${proc_id}.json"
+                local revision=""
+                revision="$(get_processor_version "${proc_id}")"
+
+                jq -n \
+                  --arg id "${proc_id}" \
+                  --argjson version "${revision}" \
+                  --argjson props "${properties_json}" \
+                  --argjson autoTerm "${auto_terminated_json}" \
+                  '{
+                    revision: {version: $version},
+                    disconnectedNodeAcknowledged: true,
+                    component: {
+                      id: $id,
+                      config: {
+                        properties: $props
+                      },
+                      autoTerminatedRelationships: $autoTerm
+                    }
+                  }' > "${payload}"
+
+                nifi_json "PUT" "/processors/${proc_id}" "${payload}" >/tmp/update-processor-response.json
+              }
+
+              ensure_connection() {
+                local source_id="$1"
+                local destination_id="$2"
+                local relationship="$3"
+                local conn_name="$4"
+                local existing=""
+                local payload="/tmp/connection-${conn_name}.json"
+
+                existing="$(nifi_get "/process-groups/${TARGET_PG_ID}/connections" \
+                  | jq -r --arg s "${source_id}" --arg d "${destination_id}" --arg r "${relationship}" \
+                    '.connections[]? | select(.component.source.id==$s and .component.destination.id==$d and ((.component.selectedRelationships // []) | index($r))) | .id' \
+                  | head -n1)"
+
+                if [ -n "${existing}" ] && [ "${existing}" != "null" ]; then
+                  return 0
+                fi
+
+                jq -n \
+                  --arg sourceId "${source_id}" \
+                  --arg destinationId "${destination_id}" \
+                  --arg groupId "${TARGET_PG_ID}" \
+                  --arg rel "${relationship}" \
+                  --arg name "${conn_name}" \
+                  '{
+                    revision: {version: 0},
+                    component: {
+                      name: $name,
+                      source: {id: $sourceId, groupId: $groupId, type: "PROCESSOR"},
+                      destination: {id: $destinationId, groupId: $groupId, type: "PROCESSOR"},
+                      selectedRelationships: [$rel],
+                      backPressureObjectThreshold: 10000,
+                      backPressureDataSizeThreshold: "1 GB",
+                      flowFileExpiration: "0 sec"
+                    }
+                  }' > "${payload}"
+
+                nifi_json "POST" "/process-groups/${TARGET_PG_ID}/connections" "${payload}" >/tmp/create-connection-response.json
+              }
+
+              start_processor() {
+                local proc_id="$1"
+                local revision=""
+                local payload="/tmp/run-${proc_id}.json"
+                revision="$(get_processor_version "${proc_id}")"
+
+                jq -n \
+                  --argjson version "${revision}" \
+                  '{
+                    revision: {version: $version},
+                    disconnectedNodeAcknowledged: true,
+                    state: "RUNNING"
+                  }' > "${payload}"
+
+                nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/run-processor-response.json
+              }
+
+              jaas_cfg="org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_NIFI_USERNAME}\" password=\"${KAFKA_NIFI_PASSWORD}\";"
+
+              log "Ensuring stage-1 processors..."
+              s1_consume_id="$(ensure_processor "batch-stage1-consume-kafka" "org.apache.nifi.processors.kafka.pubsub.ConsumeKafka_2_6" 80 120)"
+              s1_replace_id="$(ensure_processor "batch-stage1-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 120)"
+              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.processors.kafka.pubsub.PublishKafka_2_6" 860 120)"
+
+              s1_consume_props="$(jq -n \
+                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg topic "${TOPIC_STAGE1_FLINK_TO_NIFI}" \
+                --arg group "${NIFI_STAGE1_CONSUMER_GROUP}" \
+                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
+                --arg mech "${KAFKA_SASL_MECHANISM}" \
+                --arg jaas "${jaas_cfg}" \
+                '{
+                  "bootstrap.servers": $brokers,
+                  "topic": $topic,
+                  "group.id": $group,
+                  "security.protocol": $sec,
+                  "sasl.mechanism": $mech,
+                  "sasl.jaas.config": $jaas
+                }')"
+              ensure_processor_properties "${s1_consume_id}" "${s1_consume_props}" '[]'
+
+              s1_replace_props="$(jq -n \
+                --arg evalMode "Entire text" \
+                --arg strategy "Prepend" \
+                --arg replacement "nifi-stage1|" \
+                '{
+                  "Evaluation Mode": $evalMode,
+                  "Replacement Strategy": $strategy,
+                  "Replacement Value": $replacement
+                }')"
+              ensure_processor_properties "${s1_replace_id}" "${s1_replace_props}" '["failure"]'
+
+              s1_publish_props="$(jq -n \
+                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg topic "${TOPIC_STAGE2_NIFI_TO_FLINK}" \
+                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
+                --arg mech "${KAFKA_SASL_MECHANISM}" \
+                --arg jaas "${jaas_cfg}" \
+                '{
+                  "bootstrap.servers": $brokers,
+                  "topic": $topic,
+                  "security.protocol": $sec,
+                  "sasl.mechanism": $mech,
+                  "sasl.jaas.config": $jaas
+                }')"
+              ensure_processor_properties "${s1_publish_id}" "${s1_publish_props}" '["failure", "success"]'
+
+              ensure_connection "${s1_consume_id}" "${s1_replace_id}" "success" "batch-stage1-consume-to-replace"
+              ensure_connection "${s1_replace_id}" "${s1_publish_id}" "success" "batch-stage1-replace-to-publish"
+
+              log "Ensuring stage-2 processors..."
+              s2_consume_id="$(ensure_processor "batch-stage2-consume-kafka" "org.apache.nifi.processors.kafka.pubsub.ConsumeKafka_2_6" 80 520)"
+              s2_replace_id="$(ensure_processor "batch-stage2-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 520)"
+              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.processors.kafka.pubsub.PublishKafka_2_6" 860 520)"
+
+              s2_consume_props="$(jq -n \
+                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg topic "${TOPIC_STAGE2_FLINK_TO_NIFI}" \
+                --arg group "${NIFI_STAGE2_CONSUMER_GROUP}" \
+                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
+                --arg mech "${KAFKA_SASL_MECHANISM}" \
+                --arg jaas "${jaas_cfg}" \
+                '{
+                  "bootstrap.servers": $brokers,
+                  "topic": $topic,
+                  "group.id": $group,
+                  "security.protocol": $sec,
+                  "sasl.mechanism": $mech,
+                  "sasl.jaas.config": $jaas
+                }')"
+              ensure_processor_properties "${s2_consume_id}" "${s2_consume_props}" '[]'
+
+              s2_replace_props="$(jq -n \
+                --arg evalMode "Entire text" \
+                --arg strategy "Prepend" \
+                --arg replacement "nifi-stage2|" \
+                '{
+                  "Evaluation Mode": $evalMode,
+                  "Replacement Strategy": $strategy,
+                  "Replacement Value": $replacement
+                }')"
+              ensure_processor_properties "${s2_replace_id}" "${s2_replace_props}" '["failure"]'
+
+              s2_publish_props="$(jq -n \
+                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg topic "${TOPIC_FINAL}" \
+                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
+                --arg mech "${KAFKA_SASL_MECHANISM}" \
+                --arg jaas "${jaas_cfg}" \
+                '{
+                  "bootstrap.servers": $brokers,
+                  "topic": $topic,
+                  "security.protocol": $sec,
+                  "sasl.mechanism": $mech,
+                  "sasl.jaas.config": $jaas
+                }')"
+              ensure_processor_properties "${s2_publish_id}" "${s2_publish_props}" '["failure", "success"]'
+
+              ensure_connection "${s2_consume_id}" "${s2_replace_id}" "success" "batch-stage2-consume-to-replace"
+              ensure_connection "${s2_replace_id}" "${s2_publish_id}" "success" "batch-stage2-replace-to-publish"
+
+              log "Starting NiFi processors..."
+              start_processor "${s1_publish_id}"
+              start_processor "${s1_replace_id}"
+              start_processor "${s1_consume_id}"
+              start_processor "${s2_publish_id}"
+              start_processor "${s2_replace_id}"
+              start_processor "${s2_consume_id}"
+
+              log "NiFi stage-chain bootstrap completed."
