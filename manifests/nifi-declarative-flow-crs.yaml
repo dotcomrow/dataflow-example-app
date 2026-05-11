@@ -753,7 +753,7 @@ spec:
                 '{
                   "Kafka Connection Service": $cs,
                   "Group ID": $group,
-                  "Topic Format": "Names",
+                  "Topic Format": "names",
                   "Topics": $topic
                 }')"
               ensure_processor_properties "${s1_consume_id}" "${s1_consume_props}" '[]'
@@ -794,7 +794,7 @@ spec:
                 '{
                   "Kafka Connection Service": $cs,
                   "Group ID": $group,
-                  "Topic Format": "Names",
+                  "Topic Format": "names",
                   "Topics": $topic
                 }')"
               ensure_processor_properties "${s2_consume_id}" "${s2_consume_props}" '[]'
