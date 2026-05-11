@@ -125,6 +125,7 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
+  activeDeadlineSeconds: 1800
   template:
     metadata:
       labels:
@@ -294,6 +295,7 @@ metadata:
     argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 3
+  activeDeadlineSeconds: 1800
   template:
     metadata:
       labels:
@@ -423,12 +425,15 @@ spec:
                   --data @"${payload_file}"
               }
 
-              log "Waiting for NiFi API and processor catalog..."
+              log "Waiting for NiFi API root process-group endpoint..."
               ready="false"
-              for _ in $(seq 1 180); do
-                if nifi_get "/flow/processor-types" >/tmp/nifi-processor-types.json 2>/tmp/nifi-api.err; then
+              for i in $(seq 1 180); do
+                if nifi_get "/process-groups/root/process-groups" >/tmp/nifi-root-process-groups.json 2>/tmp/nifi-api.err; then
                   ready="true"
                   break
+                fi
+                if [ $((i % 12)) -eq 0 ]; then
+                  log "Still waiting for NiFi API root endpoint (attempt ${i}/180)"
                 fi
                 sleep 5
               done
@@ -438,8 +443,20 @@ spec:
                 exit 1
               fi
 
-              root_children="$(nifi_get "/process-groups/root/process-groups")"
-              TARGET_PG_ID="$(echo "${root_children}" | jq -r '.processGroups[]? | select(.component.name=="batch-nifi-kafka-example") | .id' | head -n1)"
+              log "Waiting for target process group batch-nifi-kafka-example..."
+              TARGET_PG_ID=""
+              root_children=""
+              for i in $(seq 1 120); do
+                root_children="$(nifi_get "/process-groups/root/process-groups" 2>/tmp/nifi-api.err || true)"
+                TARGET_PG_ID="$(echo "${root_children}" | jq -r '.processGroups[]? | select(.component.name=="batch-nifi-kafka-example") | .id' | head -n1)"
+                if [ -n "${TARGET_PG_ID}" ] && [ "${TARGET_PG_ID}" != "null" ]; then
+                  break
+                fi
+                if [ $((i % 12)) -eq 0 ]; then
+                  log "Target process group not visible yet (attempt ${i}/120)"
+                fi
+                sleep 5
+              done
               if [ -z "${TARGET_PG_ID}" ] || [ "${TARGET_PG_ID}" = "null" ]; then
                 log "Target process group batch-nifi-kafka-example not found under root."
                 echo "${root_children}" | jq '.processGroups[]?.component.name' || true
