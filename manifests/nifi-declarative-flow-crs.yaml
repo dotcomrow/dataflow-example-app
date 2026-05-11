@@ -286,7 +286,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: batch-nifi-stage-chain-bootstrap-v1
+  name: batch-nifi-stage-chain-bootstrap-v2
   namespace: dataflow
   annotations:
     argocd.argoproj.io/sync-wave: "66"
@@ -299,7 +299,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: batch-nifi-stage-chain-bootstrap-v1
+        app.kubernetes.io/name: batch-nifi-stage-chain-bootstrap-v2
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -364,6 +364,16 @@ spec:
                 configMapKeyRef:
                   name: batch-processing-examples-config
                   key: topic_nifi_stage2_final
+            - name: RULES_ENGINE_INVOKE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: rules_engine_invoke_url
+            - name: OPENWEBUI_INVOKE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: openwebui_invoke_url
             - name: NIFI_STAGE1_CONSUMER_GROUP
               valueFrom:
                 configMapKeyRef:
@@ -474,6 +484,70 @@ spec:
               get_processor_version() {
                 local proc_id="$1"
                 nifi_get "/processors/${proc_id}" | jq -r '.revision.version // 0'
+              }
+
+              get_processor_state() {
+                local proc_id="$1"
+                nifi_get "/processors/${proc_id}" | jq -r '.component.state // .status.aggregateSnapshot.runStatus // "UNKNOWN"'
+              }
+
+              stop_processor_if_running() {
+                local proc_id="$1"
+                local state=""
+                local payload="/tmp/stop-${proc_id}.json"
+                local revision=""
+
+                state="$(get_processor_state "${proc_id}")"
+                if [ "${state}" != "RUNNING" ]; then
+                  return 0
+                fi
+
+                log "Stopping processor ${proc_id} before configuration update"
+                revision="$(get_processor_version "${proc_id}")"
+                jq -n \
+                  --argjson version "${revision}" \
+                  '{
+                    revision: {version: $version},
+                    disconnectedNodeAcknowledged: true,
+                    state: "STOPPED"
+                  }' > "${payload}"
+                nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/stop-processor-response.json
+
+                for i in $(seq 1 30); do
+                  state="$(get_processor_state "${proc_id}")"
+                  if [ "${state}" != "RUNNING" ]; then
+                    return 0
+                  fi
+                  sleep 1
+                done
+                log "Timed out waiting for processor ${proc_id} to stop"
+                return 1
+              }
+
+              resolve_relationship_name() {
+                local proc_id="$1"
+                local requested="$2"
+                local available=""
+                local matched=""
+
+                available="$(nifi_get "/processors/${proc_id}" | jq -r '.component.relationships[]?.name' || true)"
+                if [ -z "${available}" ]; then
+                  echo "${requested}"
+                  return 0
+                fi
+
+                if printf '%s\n' "${available}" | grep -Fxq "${requested}"; then
+                  echo "${requested}"
+                  return 0
+                fi
+
+                matched="$(printf '%s\n' "${available}" | awk -v req="${requested}" 'BEGIN{IGNORECASE=1} $0==req {print; exit}')"
+                if [ -n "${matched}" ]; then
+                  echo "${matched}"
+                  return 0
+                fi
+
+                echo "${requested}"
               }
 
               get_controller_service_id() {
@@ -659,6 +733,8 @@ spec:
                 local auto_terminated_json="$3"
                 local payload="/tmp/update-${proc_id}.json"
                 local revision=""
+
+                stop_processor_if_running "${proc_id}"
                 revision="$(get_processor_version "${proc_id}")"
 
                 jq -n \
@@ -686,11 +762,14 @@ spec:
                 local destination_id="$2"
                 local relationship="$3"
                 local conn_name="$4"
+                local effective_relationship=""
                 local existing=""
                 local payload="/tmp/connection-${conn_name}.json"
 
+                effective_relationship="$(resolve_relationship_name "${source_id}" "${relationship}")"
+
                 existing="$(nifi_get "/process-groups/${TARGET_PG_ID}/connections" \
-                  | jq -r --arg s "${source_id}" --arg d "${destination_id}" --arg r "${relationship}" \
+                  | jq -r --arg s "${source_id}" --arg d "${destination_id}" --arg r "${effective_relationship}" \
                     '.connections[]? | select(.component.source.id==$s and .component.destination.id==$d and ((.component.selectedRelationships // []) | index($r))) | .id' \
                   | head -n1)"
 
@@ -702,7 +781,7 @@ spec:
                   --arg sourceId "${source_id}" \
                   --arg destinationId "${destination_id}" \
                   --arg groupId "${TARGET_PG_ID}" \
-                  --arg rel "${relationship}" \
+                  --arg rel "${effective_relationship}" \
                   --arg name "${conn_name}" \
                   '{
                     revision: {version: 0},
@@ -744,7 +823,8 @@ spec:
               log "Ensuring stage-1 processors..."
               s1_consume_id="$(ensure_processor "batch-stage1-consume-kafka" "org.apache.nifi.kafka.processors.ConsumeKafka" 80 120)"
               s1_replace_id="$(ensure_processor "batch-stage1-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 120)"
-              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 860 120)"
+              s1_rules_id="$(ensure_processor "batch-stage1-rules-engine-invoke" "org.apache.nifi.processors.standard.InvokeHTTP" 860 120)"
+              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 1260 120)"
 
               s1_consume_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
@@ -769,6 +849,17 @@ spec:
                 }')"
               ensure_processor_properties "${s1_replace_id}" "${s1_replace_props}" '["failure"]'
 
+              s1_rules_props="$(jq -n \
+                --arg url "${RULES_ENGINE_INVOKE_URL}" \
+                '{
+                  "HTTP Method": "GET",
+                  "HTTP URL": $url,
+                  "Response Generation Required": "true",
+                  "Response Body Ignored": "false",
+                  "Socket Read Timeout": "30 sec"
+                }')"
+              ensure_processor_properties "${s1_rules_id}" "${s1_rules_props}" '["Original", "Failure", "Retry", "No Retry"]'
+
               s1_publish_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
                 --arg topic "${TOPIC_STAGE2_NIFI_TO_FLINK}" \
@@ -780,12 +871,14 @@ spec:
               ensure_processor_properties "${s1_publish_id}" "${s1_publish_props}" '["failure", "success"]'
 
               ensure_connection "${s1_consume_id}" "${s1_replace_id}" "success" "batch-stage1-consume-to-replace"
-              ensure_connection "${s1_replace_id}" "${s1_publish_id}" "success" "batch-stage1-replace-to-publish"
+              ensure_connection "${s1_replace_id}" "${s1_rules_id}" "success" "batch-stage1-replace-to-rules"
+              ensure_connection "${s1_rules_id}" "${s1_publish_id}" "Response" "batch-stage1-rules-to-publish"
 
               log "Ensuring stage-2 processors..."
               s2_consume_id="$(ensure_processor "batch-stage2-consume-kafka" "org.apache.nifi.kafka.processors.ConsumeKafka" 80 520)"
               s2_replace_id="$(ensure_processor "batch-stage2-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 520)"
-              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 860 520)"
+              s2_openwebui_id="$(ensure_processor "batch-stage2-openwebui-invoke" "org.apache.nifi.processors.standard.InvokeHTTP" 860 520)"
+              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 1260 520)"
 
               s2_consume_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
@@ -810,6 +903,17 @@ spec:
                 }')"
               ensure_processor_properties "${s2_replace_id}" "${s2_replace_props}" '["failure"]'
 
+              s2_openwebui_props="$(jq -n \
+                --arg url "${OPENWEBUI_INVOKE_URL}" \
+                '{
+                  "HTTP Method": "GET",
+                  "HTTP URL": $url,
+                  "Response Generation Required": "true",
+                  "Response Body Ignored": "false",
+                  "Socket Read Timeout": "30 sec"
+                }')"
+              ensure_processor_properties "${s2_openwebui_id}" "${s2_openwebui_props}" '["Original", "Failure", "Retry", "No Retry"]'
+
               s2_publish_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
                 --arg topic "${TOPIC_FINAL}" \
@@ -821,13 +925,16 @@ spec:
               ensure_processor_properties "${s2_publish_id}" "${s2_publish_props}" '["failure", "success"]'
 
               ensure_connection "${s2_consume_id}" "${s2_replace_id}" "success" "batch-stage2-consume-to-replace"
-              ensure_connection "${s2_replace_id}" "${s2_publish_id}" "success" "batch-stage2-replace-to-publish"
+              ensure_connection "${s2_replace_id}" "${s2_openwebui_id}" "success" "batch-stage2-replace-to-openwebui"
+              ensure_connection "${s2_openwebui_id}" "${s2_publish_id}" "Response" "batch-stage2-openwebui-to-publish"
 
               log "Starting NiFi processors..."
               start_processor "${s1_publish_id}"
+              start_processor "${s1_rules_id}"
               start_processor "${s1_replace_id}"
               start_processor "${s1_consume_id}"
               start_processor "${s2_publish_id}"
+              start_processor "${s2_openwebui_id}"
               start_processor "${s2_replace_id}"
               start_processor "${s2_consume_id}"
 

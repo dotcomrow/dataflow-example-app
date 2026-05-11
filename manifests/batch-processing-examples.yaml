@@ -47,6 +47,8 @@ data:
   topic_nifi_stage1_to_flink_stage2: "batch.example.stage2.nifi-to-flink.v1"
   topic_flink_stage2_to_nifi_stage2: "batch.example.stage2.flink-to-nifi.v1"
   topic_nifi_stage2_final: "batch.example.stage3.nifi-final.v1"
+  rules_engine_invoke_url: "http://kie-server-openapi.drools.svc.cluster.local:8080/openapi.json"
+  openwebui_invoke_url: "http://open-webui-openapi.ollama.svc.cluster.local:8080/openapi.json"
 
   flink_stage1_consumer_group: "flink-batch-stage1-v1"
   flink_stage2_consumer_group: "flink-batch-stage2-v1"
@@ -73,9 +75,9 @@ data:
     It models a chained topology:
 
     1. Flink stage 1 consumes topic A and writes topic B.
-    2. NiFi stage 1 consumes topic B, does simple transformation, writes topic C.
+    2. NiFi stage 1 consumes topic B, tags content, calls Rules Engine endpoint, writes topic C.
     3. Flink stage 2 consumes topic C and writes topic D.
-    4. NiFi stage 2 consumes topic D, does simple transformation, writes topic E.
+    4. NiFi stage 2 consumes topic D, tags content, calls OpenWebUI endpoint, writes topic E.
 
     ## Topic chain
     - Topic A: `batch.example.stage1.input.v1`
@@ -87,7 +89,8 @@ data:
     ## NiFi Stage 1 flow (B -> C)
     1. `ConsumeKafka_2_6`
     2. `ReplaceText` (prepend `nifi-stage1|`)
-    3. `PublishKafka_2_6`
+    3. `InvokeHTTP` (GET Rules Engine OpenAPI endpoint)
+    4. `PublishKafka_2_6`
 
     Processor properties applied declaratively:
 
@@ -113,7 +116,8 @@ data:
     ## NiFi Stage 2 flow (D -> E)
     1. `ConsumeKafka_2_6`
     2. `ReplaceText` (prepend `nifi-stage2|`)
-    3. `PublishKafka_2_6`
+    3. `InvokeHTTP` (GET OpenWebUI OpenAPI endpoint)
+    4. `PublishKafka_2_6`
 
     Processor properties applied declaratively:
 
