@@ -673,6 +673,7 @@ spec:
                 local enabled="false"
                 local attempt=""
                 local updated="false"
+                local existing_service="false"
 
                 service_props="$(jq -n \
                   --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
@@ -689,7 +690,10 @@ spec:
                   }')"
 
                 service_id="$(get_controller_service_id "${service_name}" || true)"
-                if [ -z "${service_id}" ] || [ "${service_id}" = "null" ]; then
+                if [ -n "${service_id}" ] && [ "${service_id}" != "null" ]; then
+                  existing_service="true"
+                fi
+                if [ "${existing_service}" != "true" ]; then
                   jq -n \
                     --arg name "${service_name}" \
                     --arg type "${service_type}" \
@@ -711,6 +715,19 @@ spec:
                   log "Unable to resolve controller service id for ${service_name}"
                   cat /tmp/create-controller-service-response.json || true
                   exit 1
+                fi
+
+                # NiFi requires disabling a running controller service before config mutation.
+                # For idempotent re-runs of this bootstrap job, reuse the existing enabled service.
+                if [ "${existing_service}" = "true" ]; then
+                  service_state_json="$(nifi_get "/controller-services/${service_id}" 2>/tmp/get-controller-service.err || true)"
+                  state="$(echo "${service_state_json}" | jq -r '.component.state // .status.runStatus // "UNKNOWN"')"
+                  validation_status="$(echo "${service_state_json}" | jq -r '.component.validationStatus // .status.validationStatus // "UNKNOWN"')"
+                  if [ "${state}" = "ENABLED" ]; then
+                    log "Controller service ${service_name} already ENABLED (validation=${validation_status}); reusing existing service"
+                    echo "${service_id}"
+                    return 0
+                  fi
                 fi
 
                 log "Updating controller service ${service_name}"
