@@ -382,7 +382,7 @@ spec:
               apk add --no-cache curl jq >/dev/null
 
               log() {
-                echo "⏱️  $(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
+                echo "⏱️  $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >&2
               }
 
               nifi_get() {
@@ -473,7 +473,130 @@ spec:
 
               get_processor_version() {
                 local proc_id="$1"
-                nifi_get "/processors/${proc_id}" | jq -r '.revision.version'
+                nifi_get "/processors/${proc_id}" | jq -r '.revision.version // 0'
+              }
+
+              get_controller_service_id() {
+                local service_name="$1"
+                nifi_get "/flow/process-groups/${TARGET_PG_ID}/controller-services" \
+                  | jq -r --arg n "${service_name}" '.controllerServices[]? | select(.component.name==$n) | .id' \
+                  | head -n1
+              }
+
+              get_controller_service_version() {
+                local service_id="$1"
+                nifi_get "/controller-services/${service_id}" | jq -r '.revision.version // 0'
+              }
+
+              ensure_kafka_connection_service() {
+                local service_name="batch-kafka-connection-service"
+                local service_type="org.apache.nifi.kafka.service.Kafka3ConnectionService"
+                local create_payload="/tmp/create-controller-service.json"
+                local update_payload="/tmp/update-controller-service.json"
+                local run_payload="/tmp/run-controller-service.json"
+                local service_id=""
+                local service_rev=""
+                local service_props=""
+                local state=""
+                local validation_status=""
+                local validation_errors=""
+                local service_state_json=""
+                local enabled="false"
+
+                service_props="$(jq -n \
+                  --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                  --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
+                  --arg mech "${KAFKA_SASL_MECHANISM}" \
+                  --arg username "${KAFKA_NIFI_USERNAME}" \
+                  --arg password "${KAFKA_NIFI_PASSWORD}" \
+                  '{
+                    "bootstrap.servers": $brokers,
+                    "security.protocol": $sec,
+                    "sasl.mechanism": $mech,
+                    "sasl.username": $username,
+                    "sasl.password": $password
+                  }')"
+
+                service_id="$(get_controller_service_id "${service_name}" || true)"
+                if [ -z "${service_id}" ] || [ "${service_id}" = "null" ]; then
+                  jq -n \
+                    --arg name "${service_name}" \
+                    --arg type "${service_type}" \
+                    --argjson props "${service_props}" \
+                    '{
+                      revision: {version: 0},
+                      component: {
+                        name: $name,
+                        type: $type,
+                        properties: $props
+                      }
+                    }' > "${create_payload}"
+                  log "Creating controller service ${service_name}"
+                  nifi_json "POST" "/process-groups/${TARGET_PG_ID}/controller-services" "${create_payload}" >/tmp/create-controller-service-response.json
+                  service_id="$(jq -r '.id // .component.id' /tmp/create-controller-service-response.json)"
+                fi
+
+                if [ -z "${service_id}" ] || [ "${service_id}" = "null" ]; then
+                  log "Unable to resolve controller service id for ${service_name}"
+                  cat /tmp/create-controller-service-response.json || true
+                  exit 1
+                fi
+
+                service_rev="$(get_controller_service_version "${service_id}")"
+                jq -n \
+                  --arg id "${service_id}" \
+                  --argjson version "${service_rev}" \
+                  --argjson props "${service_props}" \
+                  '{
+                    revision: {version: $version},
+                    disconnectedNodeAcknowledged: true,
+                    component: {
+                      id: $id,
+                      properties: $props
+                    }
+                  }' > "${update_payload}"
+                log "Updating controller service ${service_name}"
+                nifi_json "PUT" "/controller-services/${service_id}" "${update_payload}" >/tmp/update-controller-service-response.json
+
+                for i in $(seq 1 60); do
+                  service_rev="$(get_controller_service_version "${service_id}")"
+                  jq -n \
+                    --argjson version "${service_rev}" \
+                    '{
+                      revision: {version: $version},
+                      disconnectedNodeAcknowledged: true,
+                      state: "ENABLED"
+                    }' > "${run_payload}"
+
+                  nifi_json "PUT" "/controller-services/${service_id}/run-status" "${run_payload}" >/tmp/run-controller-service-response.json 2>/tmp/run-controller-service.err || true
+
+                  service_state_json="$(nifi_get "/controller-services/${service_id}" 2>/tmp/get-controller-service.err || true)"
+                  if [ -z "${service_state_json}" ]; then
+                    log "Controller service status read failed (attempt ${i}/60)"
+                    sleep 2
+                    continue
+                  fi
+                  state="$(echo "${service_state_json}" | jq -r '.component.state // .status.runStatus // "UNKNOWN"')"
+                  validation_status="$(echo "${service_state_json}" | jq -r '.component.validationStatus // .status.validationStatus // "UNKNOWN"')"
+                  log "Controller service state: ${state}, validation: ${validation_status} (attempt ${i}/60)"
+                  if [ "${state}" = "ENABLED" ]; then
+                    enabled="true"
+                    break
+                  fi
+                  sleep 2
+                done
+
+                if [ "${enabled}" != "true" ]; then
+                  log "Failed to enable controller service ${service_name}"
+                  nifi_get "/controller-services/${service_id}" >/tmp/controller-service-details.json || true
+                  validation_errors="$(jq -r '.component.validationErrors[]?' /tmp/controller-service-details.json || true)"
+                  if [ -n "${validation_errors}" ]; then
+                    echo "${validation_errors}" >&2
+                  fi
+                  exit 1
+                fi
+
+                echo "${service_id}"
               }
 
               ensure_processor() {
@@ -482,6 +605,7 @@ spec:
                 local pos_x="$3"
                 local pos_y="$4"
                 local existing_id=""
+                local created_id=""
                 local payload="/tmp/create-${proc_name}.json"
                 existing_id="$(get_processor_id "${proc_name}" || true)"
                 if [ -n "${existing_id}" ] && [ "${existing_id}" != "null" ]; then
@@ -504,8 +628,29 @@ spec:
                   }' > "${payload}"
 
                 log "Creating processor ${proc_name}"
-                nifi_json "POST" "/process-groups/${TARGET_PG_ID}/processors" "${payload}" >/tmp/create-processor-response.json
-                cat /tmp/create-processor-response.json | jq -r '.id // .component.id'
+                if ! nifi_json "POST" "/process-groups/${TARGET_PG_ID}/processors" "${payload}" >/tmp/create-processor-response.json 2>/tmp/create-processor.err; then
+                  log "Processor create call failed for ${proc_name}"
+                  cat /tmp/create-processor-response.json >&2 || true
+                  cat /tmp/create-processor.err >&2 || true
+                  existing_id="$(get_processor_id "${proc_name}" || true)"
+                  if [ -n "${existing_id}" ] && [ "${existing_id}" != "null" ]; then
+                    echo "${existing_id}"
+                    return 0
+                  fi
+                  exit 1
+                fi
+                created_id="$(jq -r '.id // .component.id // empty' /tmp/create-processor-response.json || true)"
+                if [ -z "${created_id}" ]; then
+                  log "Processor create response did not contain id for ${proc_name}"
+                  cat /tmp/create-processor-response.json >&2 || true
+                  existing_id="$(get_processor_id "${proc_name}" || true)"
+                  if [ -n "${existing_id}" ] && [ "${existing_id}" != "null" ]; then
+                    echo "${existing_id}"
+                    return 0
+                  fi
+                  exit 1
+                fi
+                echo "${created_id}"
               }
 
               ensure_processor_properties() {
@@ -527,9 +672,9 @@ spec:
                     component: {
                       id: $id,
                       config: {
-                        properties: $props
-                      },
-                      autoTerminatedRelationships: $autoTerm
+                        properties: $props,
+                        autoTerminatedRelationships: $autoTerm
+                      }
                     }
                   }' > "${payload}"
 
@@ -592,27 +737,24 @@ spec:
                 nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/run-processor-response.json
               }
 
-              jaas_cfg="org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_NIFI_USERNAME}\" password=\"${KAFKA_NIFI_PASSWORD}\";"
+              log "Ensuring Kafka controller service..."
+              kafka_controller_service_id="$(ensure_kafka_connection_service)"
+              log "Kafka controller service id: ${kafka_controller_service_id}"
 
               log "Ensuring stage-1 processors..."
-              s1_consume_id="$(ensure_processor "batch-stage1-consume-kafka" "org.apache.nifi.processors.kafka.pubsub.ConsumeKafka_2_6" 80 120)"
+              s1_consume_id="$(ensure_processor "batch-stage1-consume-kafka" "org.apache.nifi.kafka.processors.ConsumeKafka" 80 120)"
               s1_replace_id="$(ensure_processor "batch-stage1-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 120)"
-              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.processors.kafka.pubsub.PublishKafka_2_6" 860 120)"
+              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 860 120)"
 
               s1_consume_props="$(jq -n \
-                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg cs "${kafka_controller_service_id}" \
                 --arg topic "${TOPIC_STAGE1_FLINK_TO_NIFI}" \
                 --arg group "${NIFI_STAGE1_CONSUMER_GROUP}" \
-                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
-                --arg mech "${KAFKA_SASL_MECHANISM}" \
-                --arg jaas "${jaas_cfg}" \
                 '{
-                  "bootstrap.servers": $brokers,
-                  "topic": $topic,
-                  "group.id": $group,
-                  "security.protocol": $sec,
-                  "sasl.mechanism": $mech,
-                  "sasl.jaas.config": $jaas
+                  "Kafka Connection Service": $cs,
+                  "Group ID": $group,
+                  "Topic Format": "Names",
+                  "Topics": $topic
                 }')"
               ensure_processor_properties "${s1_consume_id}" "${s1_consume_props}" '[]'
 
@@ -628,17 +770,12 @@ spec:
               ensure_processor_properties "${s1_replace_id}" "${s1_replace_props}" '["failure"]'
 
               s1_publish_props="$(jq -n \
-                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg cs "${kafka_controller_service_id}" \
                 --arg topic "${TOPIC_STAGE2_NIFI_TO_FLINK}" \
-                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
-                --arg mech "${KAFKA_SASL_MECHANISM}" \
-                --arg jaas "${jaas_cfg}" \
                 '{
-                  "bootstrap.servers": $brokers,
-                  "topic": $topic,
-                  "security.protocol": $sec,
-                  "sasl.mechanism": $mech,
-                  "sasl.jaas.config": $jaas
+                  "Kafka Connection Service": $cs,
+                  "Topic Name": $topic,
+                  "Transactions Enabled": "false"
                 }')"
               ensure_processor_properties "${s1_publish_id}" "${s1_publish_props}" '["failure", "success"]'
 
@@ -646,24 +783,19 @@ spec:
               ensure_connection "${s1_replace_id}" "${s1_publish_id}" "success" "batch-stage1-replace-to-publish"
 
               log "Ensuring stage-2 processors..."
-              s2_consume_id="$(ensure_processor "batch-stage2-consume-kafka" "org.apache.nifi.processors.kafka.pubsub.ConsumeKafka_2_6" 80 520)"
+              s2_consume_id="$(ensure_processor "batch-stage2-consume-kafka" "org.apache.nifi.kafka.processors.ConsumeKafka" 80 520)"
               s2_replace_id="$(ensure_processor "batch-stage2-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 520)"
-              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.processors.kafka.pubsub.PublishKafka_2_6" 860 520)"
+              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 860 520)"
 
               s2_consume_props="$(jq -n \
-                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg cs "${kafka_controller_service_id}" \
                 --arg topic "${TOPIC_STAGE2_FLINK_TO_NIFI}" \
                 --arg group "${NIFI_STAGE2_CONSUMER_GROUP}" \
-                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
-                --arg mech "${KAFKA_SASL_MECHANISM}" \
-                --arg jaas "${jaas_cfg}" \
                 '{
-                  "bootstrap.servers": $brokers,
-                  "topic": $topic,
-                  "group.id": $group,
-                  "security.protocol": $sec,
-                  "sasl.mechanism": $mech,
-                  "sasl.jaas.config": $jaas
+                  "Kafka Connection Service": $cs,
+                  "Group ID": $group,
+                  "Topic Format": "Names",
+                  "Topics": $topic
                 }')"
               ensure_processor_properties "${s2_consume_id}" "${s2_consume_props}" '[]'
 
@@ -679,17 +811,12 @@ spec:
               ensure_processor_properties "${s2_replace_id}" "${s2_replace_props}" '["failure"]'
 
               s2_publish_props="$(jq -n \
-                --arg brokers "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --arg cs "${kafka_controller_service_id}" \
                 --arg topic "${TOPIC_FINAL}" \
-                --arg sec "${KAFKA_SECURITY_PROTOCOL}" \
-                --arg mech "${KAFKA_SASL_MECHANISM}" \
-                --arg jaas "${jaas_cfg}" \
                 '{
-                  "bootstrap.servers": $brokers,
-                  "topic": $topic,
-                  "security.protocol": $sec,
-                  "sasl.mechanism": $mech,
-                  "sasl.jaas.config": $jaas
+                  "Kafka Connection Service": $cs,
+                  "Topic Name": $topic,
+                  "Transactions Enabled": "false"
                 }')"
               ensure_processor_properties "${s2_publish_id}" "${s2_publish_props}" '["failure", "success"]'
 
