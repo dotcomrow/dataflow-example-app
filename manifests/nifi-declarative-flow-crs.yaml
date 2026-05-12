@@ -397,7 +397,7 @@ spec:
 
               is_retryable_http_code() {
                 case "$1" in
-                  409|423|429|500|502|503|504|000) return 0 ;;
+                  423|429|500|502|503|504|000) return 0 ;;
                   *) return 1 ;;
                 esac
               }
@@ -565,7 +565,7 @@ spec:
 
               get_processor_state() {
                 local proc_id="$1"
-                nifi_get "/processors/${proc_id}" | jq -r '.component.state // .status.aggregateSnapshot.runStatus // "UNKNOWN"'
+                nifi_get "/processors/${proc_id}" | jq -r '.status.aggregateSnapshot.runStatus // .status.runStatus // .component.state // "UNKNOWN"'
               }
 
               stop_processor_if_running() {
@@ -573,29 +573,33 @@ spec:
                 local state=""
                 local payload="/tmp/stop-${proc_id}.json"
                 local revision=""
+                local attempt=""
 
-                state="$(get_processor_state "${proc_id}")"
-                if [ "${state}" != "RUNNING" ]; then
+                state="$(get_processor_state "${proc_id}" | tr '[:lower:]' '[:upper:]')"
+                if [ "${state}" = "STOPPED" ]; then
                   return 0
                 fi
 
-                log "Stopping processor ${proc_id} before configuration update"
-                revision="$(get_processor_version "${proc_id}")"
-                jq -n \
-                  --argjson version "${revision}" \
-                  '{
-                    revision: {version: $version},
-                    disconnectedNodeAcknowledged: true,
-                    state: "STOPPED"
-                  }' > "${payload}"
-                nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/stop-processor-response.json
+                log "Ensuring processor ${proc_id} is STOPPED before configuration update (state=${state})"
+                for attempt in $(seq 1 25); do
+                  revision="$(get_processor_version "${proc_id}")"
+                  jq -n \
+                    --argjson version "${revision}" \
+                    '{
+                      revision: {version: $version},
+                      disconnectedNodeAcknowledged: true,
+                      state: "STOPPED"
+                    }' > "${payload}"
+                  nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/stop-processor-response.json 2>/tmp/stop-processor.err || true
 
-                for i in $(seq 1 30); do
-                  state="$(get_processor_state "${proc_id}")"
-                  if [ "${state}" != "RUNNING" ]; then
+                  state="$(get_processor_state "${proc_id}" | tr '[:lower:]' '[:upper:]')"
+                  if [ "${state}" = "STOPPED" ]; then
                     return 0
                   fi
-                  sleep 1
+                  if [ $((attempt % 5)) -eq 0 ]; then
+                    log "Processor ${proc_id} still not STOPPED (state=${state}, attempt ${attempt}/25)"
+                  fi
+                  sleep 2
                 done
                 log "Timed out waiting for processor ${proc_id} to stop"
                 return 1
@@ -865,7 +869,13 @@ spec:
                 local attempt=""
 
                 for attempt in $(seq 1 25); do
-                  stop_processor_if_running "${proc_id}" || true
+                  if ! stop_processor_if_running "${proc_id}"; then
+                    if [ $((attempt % 5)) -eq 0 ]; then
+                      log "Processor ${proc_id} did not stop yet (attempt ${attempt}/25)"
+                    fi
+                    sleep 2
+                    continue
+                  fi
                   revision="$(get_processor_version "${proc_id}")"
 
                   jq -n \
