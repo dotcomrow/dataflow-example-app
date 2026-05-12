@@ -565,7 +565,7 @@ spec:
 
               get_processor_state() {
                 local proc_id="$1"
-                nifi_get "/processors/${proc_id}" | jq -r '.status.aggregateSnapshot.runStatus // .status.runStatus // .component.state // "UNKNOWN"'
+                nifi_get "/processors/${proc_id}" | jq -r '.component.state // .status.aggregateSnapshot.runStatus // .status.runStatus // "UNKNOWN"'
               }
 
               stop_processor_if_running() {
@@ -576,7 +576,7 @@ spec:
                 local attempt=""
 
                 state="$(get_processor_state "${proc_id}" | tr '[:lower:]' '[:upper:]')"
-                if [ "${state}" = "STOPPED" ]; then
+                if [ "${state}" != "RUNNING" ]; then
                   return 0
                 fi
 
@@ -593,7 +593,7 @@ spec:
                   nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/stop-processor-response.json 2>/tmp/stop-processor.err || true
 
                   state="$(get_processor_state "${proc_id}" | tr '[:lower:]' '[:upper:]')"
-                  if [ "${state}" = "STOPPED" ]; then
+                  if [ "${state}" != "RUNNING" ]; then
                     return 0
                   fi
                   if [ $((attempt % 5)) -eq 0 ]; then
