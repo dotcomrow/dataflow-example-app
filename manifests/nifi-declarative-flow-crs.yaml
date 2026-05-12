@@ -605,6 +605,34 @@ spec:
                 return 1
               }
 
+              force_stop_processor() {
+                local proc_id="$1"
+                local payload="/tmp/force-stop-${proc_id}.json"
+                local revision=""
+                local state=""
+                local attempt=""
+
+                for attempt in $(seq 1 15); do
+                  revision="$(get_processor_version "${proc_id}")"
+                  jq -n \
+                    --argjson version "${revision}" \
+                    '{
+                      revision: {version: $version},
+                      disconnectedNodeAcknowledged: true,
+                      state: "STOPPED"
+                    }' > "${payload}"
+                  nifi_json "PUT" "/processors/${proc_id}/run-status" "${payload}" >/tmp/force-stop-processor-response.json 2>/tmp/force-stop-processor.err || true
+
+                  state="$(get_processor_state "${proc_id}" | tr '[:lower:]' '[:upper:]')"
+                  if [ "${state}" != "RUNNING" ]; then
+                    return 0
+                  fi
+                  sleep 1
+                done
+
+                return 1
+              }
+
               resolve_relationship_name() {
                 local proc_id="$1"
                 local requested="$2"
@@ -867,6 +895,7 @@ spec:
                 local payload="/tmp/update-${proc_id}.json"
                 local revision=""
                 local attempt=""
+                local running_conflict="false"
 
                 for attempt in $(seq 1 25); do
                   if ! stop_processor_if_running "${proc_id}"; then
@@ -895,9 +924,21 @@ spec:
                       }
                     }' > "${payload}"
 
-                  if nifi_json "PUT" "/processors/${proc_id}" "${payload}" >/tmp/update-processor-response.json; then
+                  if nifi_json "PUT" "/processors/${proc_id}" "${payload}" >/tmp/update-processor-response.json 2>/tmp/update-processor.err; then
                     return 0
                   fi
+
+                  running_conflict="false"
+                  if [ -f /tmp/update-processor.err ] && grep -qi "while the Processor is running" /tmp/update-processor.err; then
+                    running_conflict="true"
+                  fi
+                  if [ "${running_conflict}" = "true" ]; then
+                    log "Processor ${proc_id} reported running during update; forcing STOP then retry"
+                    force_stop_processor "${proc_id}" || true
+                    sleep 2
+                    continue
+                  fi
+
                   if [ $((attempt % 5)) -eq 0 ]; then
                     log "Processor property update still retrying for ${proc_id} (attempt ${attempt}/25)"
                   fi
