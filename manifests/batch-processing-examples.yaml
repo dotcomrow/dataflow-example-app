@@ -33,6 +33,10 @@ stringData:
   nifi_password: "<path:secret/data/kafka-nifi-password#value>"
   flink_username: "<path:secret/data/kafka-flink-username#value>"
   flink_password: "<path:secret/data/kafka-flink-password#value>"
+  keycloak_internal_client_id: "<path:secret/data/keycloak-client-id-drools-kie-server-service#value>"
+  keycloak_internal_client_secret: "<path:secret/data/keycloak-client-secret-drools-kie-server-service#value>"
+  keycloak_external_client_id: "<path:secret/data/keycloak-client-id-graphql-api#value>"
+  keycloak_external_client_secret: "<path:secret/data/keycloak-client-secret-graphql-api#value>"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -47,8 +51,10 @@ data:
   topic_nifi_stage1_to_flink_stage2: "batch.example.stage2.nifi-to-flink.v1"
   topic_flink_stage2_to_nifi_stage2: "batch.example.stage2.flink-to-nifi.v1"
   topic_nifi_stage2_final: "batch.example.stage3.nifi-final.v1"
-  rules_engine_invoke_url: "http://gravitee-gateway.k8s-api-gateway.svc.cluster.local:8082/kie-server/services/rest/server/swagger.json"
-  openwebui_invoke_url: "http://gravitee-gateway.k8s-api-gateway.svc.cluster.local:8082/open-webui/openapi.json"
+  keycloak_internal_token_url: "https://auth.suncoast.systems/realms/internal/protocol/openid-connect/token"
+  keycloak_external_token_url: "https://auth.suncoast.systems/realms/external/protocol/openid-connect/token"
+  rules_engine_invoke_url: "http://gravitee-gateway.k8s-api-gateway.svc.cluster.local:8082/kie-server/services/rest/server/containers/tool-use-policy"
+  openwebui_invoke_url: "http://gravitee-gateway.k8s-api-gateway.svc.cluster.local:8082/open-webui/api/models"
 
   flink_stage1_consumer_group: "flink-batch-stage1-v1"
   flink_stage2_consumer_group: "flink-batch-stage2-v1"
@@ -75,9 +81,9 @@ data:
     It models a chained topology:
 
     1. Flink stage 1 consumes topic A and writes topic B.
-    2. NiFi stage 1 consumes topic B, tags content, calls Rules Engine via Gravitee, writes topic C.
+    2. NiFi stage 1 consumes topic B, fetches internal Keycloak token, calls Rules Engine via Gravitee, writes topic C.
     3. Flink stage 2 consumes topic C and writes topic D.
-    4. NiFi stage 2 consumes topic D, tags content, calls OpenWebUI via Gravitee, writes topic E.
+    4. NiFi stage 2 consumes topic D, fetches external Keycloak token, calls OpenWebUI via Gravitee, writes topic E.
 
     ## Topic chain
     - Topic A: `batch.example.stage1.input.v1`
@@ -88,9 +94,12 @@ data:
 
     ## NiFi Stage 1 flow (B -> C)
     1. `ConsumeKafka_2_6`
-    2. `ReplaceText` (prepend `nifi-stage1|`)
-    3. `InvokeHTTP` (GET Rules Engine OpenAPI endpoint)
-    4. `PublishKafka_2_6`
+    2. `ReplaceText` (build Keycloak internal token request)
+    3. `InvokeHTTP` (POST Keycloak internal token endpoint)
+    4. `EvaluateJsonPath` (extract `access_token`)
+    5. `ReplaceText` (build Rules Engine command payload)
+    6. `InvokeHTTP` (POST Rules Engine container endpoint via Gravitee)
+    7. `PublishKafka_2_6`
 
     Processor properties applied declaratively:
 
@@ -103,9 +112,11 @@ data:
     - sasl.jaas.config:
       `org.apache.kafka.common.security.scram.ScramLoginModule required username="${kafka-security-credentials:nifi_username}" password="${kafka-security-credentials:nifi_password}";`
 
-    `ReplaceText`
-    - Replacement Strategy: `Prepend`
-    - Replacement Value: `nifi-stage1|`
+    `InvokeHTTP` (Rules Engine)
+    - URL: `/kie-server/services/rest/server/containers/tool-use-policy`
+    - Method: `POST`
+    - Header: `Authorization: Bearer <internal token>`
+    - Body: KIE `commands` payload for `ToolUseRequest`
 
     `PublishKafka_2_6`
     - Topic Name: `batch.example.stage2.nifi-to-flink.v1`
@@ -115,9 +126,11 @@ data:
 
     ## NiFi Stage 2 flow (D -> E)
     1. `ConsumeKafka_2_6`
-    2. `ReplaceText` (prepend `nifi-stage2|`)
-    3. `InvokeHTTP` (GET OpenWebUI OpenAPI endpoint)
-    4. `PublishKafka_2_6`
+    2. `ReplaceText` (build Keycloak external token request)
+    3. `InvokeHTTP` (POST Keycloak external token endpoint)
+    4. `EvaluateJsonPath` (extract `access_token`)
+    5. `InvokeHTTP` (GET OpenWebUI models endpoint via Gravitee)
+    6. `PublishKafka_2_6`
 
     Processor properties applied declaratively:
 
@@ -128,9 +141,10 @@ data:
     - security.protocol: `#{batch.kafka.security.protocol}`
     - sasl.mechanism: `#{batch.kafka.sasl.mechanism}`
 
-    `ReplaceText`
-    - Replacement Strategy: `Prepend`
-    - Replacement Value: `nifi-stage2|`
+    `InvokeHTTP` (OpenWebUI)
+    - URL: `/open-webui/api/models`
+    - Method: `GET`
+    - Header: `Authorization: Bearer <external token>`
 
     `PublishKafka_2_6`
     - Topic Name: `batch.example.stage3.nifi-final.v1`

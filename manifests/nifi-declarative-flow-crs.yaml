@@ -374,6 +374,36 @@ spec:
                 configMapKeyRef:
                   name: batch-processing-examples-config
                   key: openwebui_invoke_url
+            - name: KEYCLOAK_INTERNAL_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: keycloak_internal_token_url
+            - name: KEYCLOAK_EXTERNAL_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-processing-examples-config
+                  key: keycloak_external_token_url
+            - name: KEYCLOAK_INTERNAL_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: keycloak_internal_client_id
+            - name: KEYCLOAK_INTERNAL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: keycloak_internal_client_secret
+            - name: KEYCLOAK_EXTERNAL_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: keycloak_external_client_id
+            - name: KEYCLOAK_EXTERNAL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: keycloak_external_client_secret
             - name: NIFI_STAGE1_CONSUMER_GROUP
               valueFrom:
                 configMapKeyRef:
@@ -1035,11 +1065,23 @@ spec:
               kafka_controller_service_id="$(ensure_kafka_connection_service)"
               log "Kafka controller service id: ${kafka_controller_service_id}"
 
+              urlencode() {
+                jq -nr --arg v "$1" '$v|@uri'
+              }
+
+              internal_client_id_enc="$(urlencode "${KEYCLOAK_INTERNAL_CLIENT_ID}")"
+              internal_client_secret_enc="$(urlencode "${KEYCLOAK_INTERNAL_CLIENT_SECRET}")"
+              external_client_id_enc="$(urlencode "${KEYCLOAK_EXTERNAL_CLIENT_ID}")"
+              external_client_secret_enc="$(urlencode "${KEYCLOAK_EXTERNAL_CLIENT_SECRET}")"
+
               log "Ensuring stage-1 processors..."
               s1_consume_id="$(ensure_processor "batch-stage1-consume-kafka" "org.apache.nifi.kafka.processors.ConsumeKafka" 80 120)"
-              s1_replace_id="$(ensure_processor "batch-stage1-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 120)"
-              s1_rules_id="$(ensure_processor "batch-stage1-rules-engine-invoke" "org.apache.nifi.processors.standard.InvokeHTTP" 860 120)"
-              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 1260 120)"
+              s1_token_request_id="$(ensure_processor "batch-stage1-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 360 120)"
+              s1_token_invoke_id="$(ensure_processor "batch-stage1-fetch-internal-token" "org.apache.nifi.processors.standard.InvokeHTTP" 650 120)"
+              s1_token_extract_id="$(ensure_processor "batch-stage1-extract-internal-token" "org.apache.nifi.processors.standard.EvaluateJsonPath" 940 120)"
+              s1_rules_request_id="$(ensure_processor "batch-stage1-build-rules-request" "org.apache.nifi.processors.standard.ReplaceText" 1230 120)"
+              s1_rules_invoke_id="$(ensure_processor "batch-stage1-rules-engine-invoke" "org.apache.nifi.processors.standard.InvokeHTTP" 1520 120)"
+              s1_publish_id="$(ensure_processor "batch-stage1-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 1810 120)"
 
               s1_consume_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
@@ -1053,27 +1095,62 @@ spec:
                 }')"
               ensure_processor_properties "${s1_consume_id}" "${s1_consume_props}" '[]'
 
-              s1_replace_props="$(jq -n \
+              s1_token_request_props="$(jq -n \
                 --arg evalMode "Entire text" \
-                --arg strategy "Prepend" \
-                --arg replacement "nifi-stage1|" \
+                --arg strategy "Always Replace" \
+                --arg replacement "grant_type=client_credentials&client_id=${internal_client_id_enc}&client_secret=${internal_client_secret_enc}" \
                 '{
                   "Evaluation Mode": $evalMode,
                   "Replacement Strategy": $strategy,
                   "Replacement Value": $replacement
                 }')"
-              ensure_processor_properties "${s1_replace_id}" "${s1_replace_props}" '["failure"]'
+              ensure_processor_properties "${s1_token_request_id}" "${s1_token_request_props}" '["failure"]'
 
-              s1_rules_props="$(jq -n \
-                --arg url "${RULES_ENGINE_INVOKE_URL}" \
+              s1_token_invoke_props="$(jq -n \
+                --arg url "${KEYCLOAK_INTERNAL_TOKEN_URL}" \
                 '{
-                  "HTTP Method": "GET",
+                  "HTTP Method": "POST",
                   "HTTP URL": $url,
                   "Response Generation Required": "true",
                   "Response Body Ignored": "false",
-                  "Socket Read Timeout": "30 sec"
+                  "Socket Read Timeout": "30 sec",
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "Accept": "application/json"
                 }')"
-              ensure_processor_properties "${s1_rules_id}" "${s1_rules_props}" '["Original", "Failure", "Retry", "No Retry"]'
+              ensure_processor_properties "${s1_token_invoke_id}" "${s1_token_invoke_props}" '["Original", "Failure", "Retry", "No Retry"]'
+
+              s1_token_extract_props="$(jq -n \
+                '{
+                  "Destination": "flowfile-attribute",
+                  "oauth_internal_access_token": "$.access_token"
+                }')"
+              ensure_processor_properties "${s1_token_extract_id}" "${s1_token_extract_props}" '["unmatched", "failure"]'
+
+              s1_rules_request_props="$(jq -n \
+                --arg evalMode "Entire text" \
+                --arg strategy "Always Replace" \
+                --arg replacement '{"lookup":"tool-use-ksession","commands":[{"insert":{"object":{"com.dotcomrow.rules.tooluse.ToolUseRequest":{"tool":"refund","userRole":"member","riskScore":72,"amount":150.0}},"out-identifier":"request"}},{"fire-all-rules":{}},{"get-objects":{"out-identifier":"decisions","object-filter":"com.dotcomrow.rules.tooluse.ToolUseDecision"}}]}' \
+                '{
+                  "Evaluation Mode": $evalMode,
+                  "Replacement Strategy": $strategy,
+                  "Replacement Value": $replacement
+                }')"
+              ensure_processor_properties "${s1_rules_request_id}" "${s1_rules_request_props}" '["failure"]'
+
+              s1_rules_invoke_props="$(jq -n \
+                --arg url "${RULES_ENGINE_INVOKE_URL}" \
+                --arg auth "Bearer ${'$'}{oauth_internal_access_token}" \
+                '{
+                  "HTTP Method": "POST",
+                  "HTTP URL": $url,
+                  "Response Generation Required": "true",
+                  "Response Body Ignored": "false",
+                  "Socket Read Timeout": "30 sec",
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+                  "Authorization": $auth
+                }')"
+              ensure_processor_properties "${s1_rules_invoke_id}" "${s1_rules_invoke_props}" '["Original", "Failure", "Retry", "No Retry"]'
 
               s1_publish_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
@@ -1085,15 +1162,20 @@ spec:
                 }')"
               ensure_processor_properties "${s1_publish_id}" "${s1_publish_props}" '["failure", "success"]'
 
-              ensure_connection "${s1_consume_id}" "${s1_replace_id}" "success" "batch-stage1-consume-to-replace"
-              ensure_connection "${s1_replace_id}" "${s1_rules_id}" "success" "batch-stage1-replace-to-rules"
-              ensure_connection "${s1_rules_id}" "${s1_publish_id}" "Response" "batch-stage1-rules-to-publish"
+              ensure_connection "${s1_consume_id}" "${s1_token_request_id}" "success" "batch-stage1-consume-to-replace"
+              ensure_connection "${s1_token_request_id}" "${s1_token_invoke_id}" "success" "batch-stage1-replace-to-rules"
+              ensure_connection "${s1_token_invoke_id}" "${s1_token_extract_id}" "Response" "batch-stage1-token-response-to-extract"
+              ensure_connection "${s1_token_extract_id}" "${s1_rules_request_id}" "matched" "batch-stage1-token-extract-to-rules-request"
+              ensure_connection "${s1_rules_request_id}" "${s1_rules_invoke_id}" "success" "batch-stage1-rules-request-to-invoke"
+              ensure_connection "${s1_rules_invoke_id}" "${s1_publish_id}" "Response" "batch-stage1-rules-to-publish"
 
               log "Ensuring stage-2 processors..."
               s2_consume_id="$(ensure_processor "batch-stage2-consume-kafka" "org.apache.nifi.kafka.processors.ConsumeKafka" 80 520)"
-              s2_replace_id="$(ensure_processor "batch-stage2-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 460 520)"
-              s2_openwebui_id="$(ensure_processor "batch-stage2-openwebui-invoke" "org.apache.nifi.processors.standard.InvokeHTTP" 860 520)"
-              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 1260 520)"
+              s2_token_request_id="$(ensure_processor "batch-stage2-tag-content" "org.apache.nifi.processors.standard.ReplaceText" 360 520)"
+              s2_token_invoke_id="$(ensure_processor "batch-stage2-fetch-external-token" "org.apache.nifi.processors.standard.InvokeHTTP" 650 520)"
+              s2_token_extract_id="$(ensure_processor "batch-stage2-extract-external-token" "org.apache.nifi.processors.standard.EvaluateJsonPath" 940 520)"
+              s2_openwebui_id="$(ensure_processor "batch-stage2-openwebui-invoke" "org.apache.nifi.processors.standard.InvokeHTTP" 1230 520)"
+              s2_publish_id="$(ensure_processor "batch-stage2-publish-kafka" "org.apache.nifi.kafka.processors.PublishKafka" 1520 520)"
 
               s2_consume_props="$(jq -n \
                 --arg cs "${kafka_controller_service_id}" \
@@ -1107,25 +1189,48 @@ spec:
                 }')"
               ensure_processor_properties "${s2_consume_id}" "${s2_consume_props}" '[]'
 
-              s2_replace_props="$(jq -n \
+              s2_token_request_props="$(jq -n \
                 --arg evalMode "Entire text" \
-                --arg strategy "Prepend" \
-                --arg replacement "nifi-stage2|" \
+                --arg strategy "Always Replace" \
+                --arg replacement "grant_type=client_credentials&client_id=${external_client_id_enc}&client_secret=${external_client_secret_enc}" \
                 '{
                   "Evaluation Mode": $evalMode,
                   "Replacement Strategy": $strategy,
                   "Replacement Value": $replacement
                 }')"
-              ensure_processor_properties "${s2_replace_id}" "${s2_replace_props}" '["failure"]'
+              ensure_processor_properties "${s2_token_request_id}" "${s2_token_request_props}" '["failure"]'
+
+              s2_token_invoke_props="$(jq -n \
+                --arg url "${KEYCLOAK_EXTERNAL_TOKEN_URL}" \
+                '{
+                  "HTTP Method": "POST",
+                  "HTTP URL": $url,
+                  "Response Generation Required": "true",
+                  "Response Body Ignored": "false",
+                  "Socket Read Timeout": "30 sec",
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "Accept": "application/json"
+                }')"
+              ensure_processor_properties "${s2_token_invoke_id}" "${s2_token_invoke_props}" '["Original", "Failure", "Retry", "No Retry"]'
+
+              s2_token_extract_props="$(jq -n \
+                '{
+                  "Destination": "flowfile-attribute",
+                  "oauth_external_access_token": "$.access_token"
+                }')"
+              ensure_processor_properties "${s2_token_extract_id}" "${s2_token_extract_props}" '["unmatched", "failure"]'
 
               s2_openwebui_props="$(jq -n \
                 --arg url "${OPENWEBUI_INVOKE_URL}" \
+                --arg auth "Bearer ${'$'}{oauth_external_access_token}" \
                 '{
                   "HTTP Method": "GET",
                   "HTTP URL": $url,
                   "Response Generation Required": "true",
                   "Response Body Ignored": "false",
-                  "Socket Read Timeout": "30 sec"
+                  "Socket Read Timeout": "30 sec",
+                  "Accept": "application/json",
+                  "Authorization": $auth
                 }')"
               ensure_processor_properties "${s2_openwebui_id}" "${s2_openwebui_props}" '["Original", "Failure", "Retry", "No Retry"]'
 
@@ -1139,18 +1244,25 @@ spec:
                 }')"
               ensure_processor_properties "${s2_publish_id}" "${s2_publish_props}" '["failure", "success"]'
 
-              ensure_connection "${s2_consume_id}" "${s2_replace_id}" "success" "batch-stage2-consume-to-replace"
-              ensure_connection "${s2_replace_id}" "${s2_openwebui_id}" "success" "batch-stage2-replace-to-openwebui"
+              ensure_connection "${s2_consume_id}" "${s2_token_request_id}" "success" "batch-stage2-consume-to-replace"
+              ensure_connection "${s2_token_request_id}" "${s2_token_invoke_id}" "success" "batch-stage2-replace-to-openwebui"
+              ensure_connection "${s2_token_invoke_id}" "${s2_token_extract_id}" "Response" "batch-stage2-token-response-to-extract"
+              ensure_connection "${s2_token_extract_id}" "${s2_openwebui_id}" "matched" "batch-stage2-token-extract-to-openwebui"
               ensure_connection "${s2_openwebui_id}" "${s2_publish_id}" "Response" "batch-stage2-openwebui-to-publish"
 
               log "Starting NiFi processors..."
               start_processor "${s1_publish_id}"
-              start_processor "${s1_rules_id}"
-              start_processor "${s1_replace_id}"
+              start_processor "${s1_rules_invoke_id}"
+              start_processor "${s1_rules_request_id}"
+              start_processor "${s1_token_extract_id}"
+              start_processor "${s1_token_invoke_id}"
+              start_processor "${s1_token_request_id}"
               start_processor "${s1_consume_id}"
               start_processor "${s2_publish_id}"
               start_processor "${s2_openwebui_id}"
-              start_processor "${s2_replace_id}"
+              start_processor "${s2_token_extract_id}"
+              start_processor "${s2_token_invoke_id}"
+              start_processor "${s2_token_request_id}"
               start_processor "${s2_consume_id}"
 
               log "NiFi stage-chain bootstrap completed."
