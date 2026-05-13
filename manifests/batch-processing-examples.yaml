@@ -47,8 +47,8 @@ data:
   topic_nifi_stage1_to_flink_stage2: "batch.example.stage2.nifi-to-flink.v1"
   topic_flink_stage2_to_nifi_stage2: "batch.example.stage2.flink-to-nifi.v1"
   topic_nifi_stage2_final: "batch.example.stage3.nifi-final.v1"
-  rules_engine_invoke_url: "http://kie-server-openapi.drools.svc.cluster.local:8080/openapi.json"
-  openwebui_invoke_url: "http://open-webui-openapi.ollama.svc.cluster.local:8080/openapi.json"
+  rules_engine_invoke_url: "http://gravitee-gateway.k8s-api-gateway.svc.cluster.local:8082/kie-server/services/rest/server/swagger.json"
+  openwebui_invoke_url: "http://gravitee-gateway.k8s-api-gateway.svc.cluster.local:8082/open-webui/openapi.json"
 
   flink_stage1_consumer_group: "flink-batch-stage1-v1"
   flink_stage2_consumer_group: "flink-batch-stage2-v1"
@@ -75,9 +75,9 @@ data:
     It models a chained topology:
 
     1. Flink stage 1 consumes topic A and writes topic B.
-    2. NiFi stage 1 consumes topic B, tags content, calls Rules Engine endpoint, writes topic C.
+    2. NiFi stage 1 consumes topic B, tags content, calls Rules Engine via Gravitee, writes topic C.
     3. Flink stage 2 consumes topic C and writes topic D.
-    4. NiFi stage 2 consumes topic D, tags content, calls OpenWebUI endpoint, writes topic E.
+    4. NiFi stage 2 consumes topic D, tags content, calls OpenWebUI via Gravitee, writes topic E.
 
     ## Topic chain
     - Topic A: `batch.example.stage1.input.v1`
