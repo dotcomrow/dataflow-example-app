@@ -1139,7 +1139,7 @@ spec:
 
               s1_rules_invoke_props="$(jq -n \
                 --arg url "${RULES_ENGINE_INVOKE_URL}" \
-                --arg auth "Bearer ${'$'}{oauth_internal_access_token}" \
+                --arg auth 'Bearer ${oauth_internal_access_token}' \
                 '{
                   "HTTP Method": "POST",
                   "HTTP URL": $url,
@@ -1222,7 +1222,7 @@ spec:
 
               s2_openwebui_props="$(jq -n \
                 --arg url "${OPENWEBUI_INVOKE_URL}" \
-                --arg auth "Bearer ${'$'}{oauth_external_access_token}" \
+                --arg auth 'Bearer ${oauth_external_access_token}' \
                 '{
                   "HTTP Method": "GET",
                   "HTTP URL": $url,
